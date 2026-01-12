@@ -69,6 +69,7 @@
                 "rustfmt"
               ])
               pkgs.cmake
+              pkgs.gcc
             ];
 
             shellHook = ''
