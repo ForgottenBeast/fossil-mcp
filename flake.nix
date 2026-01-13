@@ -68,8 +68,7 @@
                 "rustc"
                 "rustfmt"
               ])
-              pkgs.cmake
-              pkgs.gcc
+              pkgs.jq
               pkgs.fossil
             ];
 
