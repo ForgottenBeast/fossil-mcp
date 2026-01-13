@@ -10,15 +10,11 @@
 //! - `handlers`: MCP tool handler implementations
 //! - `server`: MCP router implementation
 
-pub mod handlers;
 pub mod server;
-pub mod state;
-pub mod types;
 
 // Re-export commonly used types for convenience
-pub use server::FossilRouter;
-pub use state::AppState;
-pub use types::{
+pub use server::FossilWiki;
+pub use server::types::{
     ListWikiPagesArgs, ListWikiPagesResponse, ReadWikiPageArgs, ReadWikiPageResponse,
     WriteWikiPageArgs, WriteWikiPageResponse,
 };

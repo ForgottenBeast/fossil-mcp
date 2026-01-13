@@ -1,10 +1,6 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// Arguments for listing wiki pages
-#[derive(Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-pub struct ListWikiPagesArgs {}
-
 /// Arguments for reading a wiki page
 #[derive(Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct ReadWikiPageArgs {
@@ -24,7 +20,6 @@ pub struct WriteWikiPageArgs {
 #[derive(Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct ListWikiPagesResponse {
     pub pages: Vec<String>,
-    pub count: usize,
 }
 
 /// Response for reading a wiki page

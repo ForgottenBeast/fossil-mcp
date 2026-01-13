@@ -8,31 +8,10 @@ use crate::types::{
 };
 
 /// Parse wiki list output into pages
-pub fn parse_wiki_list(output: &str) -> Vec<String> {
-    output
-        .lines()
-        .map(|line| line.trim().to_string())
-        .filter(|line| !line.is_empty())
-        .collect()
-}
 
 /// List all wiki pages in the Fossil repository
 pub async fn list_wiki_pages(_args: ListWikiPagesArgs, state: AppState) -> Result<ListWikiPagesResponse> {
-    let output = Command::new("fossil")
-        .arg("-R")
-        .arg(state.repository_path.as_ref())
-        .args(["wiki", "list"])
-        .output()
-        .await
-        .context("Failed to execute fossil wiki list")?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("fossil wiki list failed: {}", stderr);
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let pages = parse_wiki_list(&stdout);
     let count = pages.len();
 
     Ok(ListWikiPagesResponse { pages, count })

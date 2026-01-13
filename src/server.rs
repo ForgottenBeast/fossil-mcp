@@ -1,37 +1,54 @@
+use anyhow::{Context, Result};
 use rmcp::{
     handler::server::{tool::ToolRouter, wrapper::Parameters, ServerHandler},
     model::{ServerCapabilities, ServerInfo},
     tool, tool_router, Json,
 };
 
-use crate::handlers;
-use crate::state::AppState;
+use tokio::process::Command;
 use crate::types::{ListWikiPagesArgs, ReadWikiPageArgs, WriteWikiPageArgs};
 
-#[derive(Clone)]
-pub struct FossilRouter {
-    state: AppState,
-    tool_router: ToolRouter<Self>,
+pub mod types;
+
+pub fn parse_wiki_list(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty())
+        .collect()
 }
 
+
+#[derive(Clone)]
+pub struct FossilWiki(Arc<PathBuf>),
+
 #[tool_router]
-impl FossilRouter {
-    pub fn new(state: AppState) -> Self {
-        Self {
-            state,
-            tool_router: ToolRouter::new(),
-        }
+impl FossilWiki {
+    pub fn new(path: PathBuf) -> Self {
+        Self(Arc::new(path))
     }
 
     /// List all wiki pages in the Fossil repository
     #[tool(description = "List all wiki pages in the Fossil repository")]
     async fn list_wiki_pages(
         &self,
-        _args: Parameters<ListWikiPagesArgs>,
-    ) -> Result<Json<crate::types::ListWikiPagesResponse>, String> {
-        let result = handlers::list_wiki_pages(ListWikiPagesArgs {}, self.state.clone())
+    ) -> Result<Json<types::ListWikiPagesResponse>, String> {
+        let output = Command::new("fossil")
+            .arg("-R")
+            .arg(state.repository_path.as_ref())
+            .args(["wiki", "list"])
+            .output()
             .await
             .map_err(|e| e.to_string())?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("fossil wiki list failed: {}", stderr);
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let pages = parse_wiki_list(&stdout);
+
         Ok(Json(result))
     }
 
@@ -40,7 +57,7 @@ impl FossilRouter {
     async fn read_wiki_page(
         &self,
         args: Parameters<ReadWikiPageArgs>,
-    ) -> Result<Json<crate::types::ReadWikiPageResponse>, String> {
+    ) -> Result<Json<types::ReadWikiPageResponse>, String> {
         let result = handlers::read_wiki_page(args.0, self.state.clone())
             .await
             .map_err(|e| e.to_string())?;
@@ -52,7 +69,7 @@ impl FossilRouter {
     async fn write_wiki_page(
         &self,
         args: Parameters<WriteWikiPageArgs>,
-    ) -> Result<Json<crate::types::WriteWikiPageResponse>, String> {
+    ) -> Result<Json<types::WriteWikiPageResponse>, String> {
         let result = handlers::write_wiki_page(args.0, self.state.clone())
             .await
             .map_err(|e| e.to_string())?;
