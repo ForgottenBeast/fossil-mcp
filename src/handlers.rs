@@ -1,9 +1,11 @@
 use anyhow::{Context, Result};
-use serde_json::json;
 use tokio::process::Command;
 
 use crate::state::AppState;
-use crate::types::{ListWikiPagesArgs, ReadWikiPageArgs, WriteWikiPageArgs};
+use crate::types::{
+    ListWikiPagesArgs, ListWikiPagesResponse, ReadWikiPageArgs, ReadWikiPageResponse,
+    WriteWikiPageArgs, WriteWikiPageResponse,
+};
 
 /// Parse wiki list output into pages
 pub fn parse_wiki_list(output: &str) -> Vec<String> {
@@ -15,7 +17,7 @@ pub fn parse_wiki_list(output: &str) -> Vec<String> {
 }
 
 /// List all wiki pages in the Fossil repository
-pub async fn list_wiki_pages(_args: ListWikiPagesArgs, state: AppState) -> Result<serde_json::Value> {
+pub async fn list_wiki_pages(_args: ListWikiPagesArgs, state: AppState) -> Result<ListWikiPagesResponse> {
     let output = Command::new("fossil")
         .arg("-R")
         .arg(state.repository_path.as_ref())
@@ -31,15 +33,13 @@ pub async fn list_wiki_pages(_args: ListWikiPagesArgs, state: AppState) -> Resul
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let pages = parse_wiki_list(&stdout);
+    let count = pages.len();
 
-    Ok(json!({
-        "pages": pages,
-        "count": pages.len()
-    }))
+    Ok(ListWikiPagesResponse { pages, count })
 }
 
 /// Read the content of a specific wiki page
-pub async fn read_wiki_page(args: ReadWikiPageArgs, state: AppState) -> Result<serde_json::Value> {
+pub async fn read_wiki_page(args: ReadWikiPageArgs, state: AppState) -> Result<ReadWikiPageResponse> {
     let output = Command::new("fossil")
         .arg("-R")
         .arg(state.repository_path.as_ref())
@@ -55,14 +55,14 @@ pub async fn read_wiki_page(args: ReadWikiPageArgs, state: AppState) -> Result<s
 
     let content = String::from_utf8_lossy(&output.stdout).to_string();
 
-    Ok(json!({
-        "page_name": args.page_name,
-        "content": content
-    }))
+    Ok(ReadWikiPageResponse {
+        page_name: args.page_name,
+        content,
+    })
 }
 
 /// Create or update a wiki page
-pub async fn write_wiki_page(args: WriteWikiPageArgs, state: AppState) -> Result<serde_json::Value> {
+pub async fn write_wiki_page(args: WriteWikiPageArgs, state: AppState) -> Result<WriteWikiPageResponse> {
     // Write content to a temporary file
     let temp_file = format!("/tmp/fossil_wiki_{}.txt", args.page_name.replace("/", "_"));
     tokio::fs::write(&temp_file, &args.content)
@@ -91,11 +91,11 @@ pub async fn write_wiki_page(args: WriteWikiPageArgs, state: AppState) -> Result
         anyhow::bail!("fossil wiki commit failed: {}", stderr);
     }
 
-    Ok(json!({
-        "success": true,
-        "page_name": args.page_name,
-        "message": "Wiki page written successfully"
-    }))
+    Ok(WriteWikiPageResponse {
+        success: true,
+        page_name: args.page_name,
+        message: "Wiki page written successfully".to_string(),
+    })
 }
 
 #[cfg(test)]
