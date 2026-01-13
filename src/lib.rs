@@ -18,4 +18,7 @@ pub mod types;
 // Re-export commonly used types for convenience
 pub use server::FossilRouter;
 pub use state::AppState;
-pub use types::{ListWikiPagesArgs, ReadWikiPageArgs, WriteWikiPageArgs};
+pub use types::{
+    ListWikiPagesArgs, ListWikiPagesResponse, ReadWikiPageArgs, ReadWikiPageResponse,
+    WriteWikiPageArgs, WriteWikiPageResponse,
+};

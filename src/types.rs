@@ -1,22 +1,45 @@
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// Arguments for listing wiki pages
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct ListWikiPagesArgs {}
 
 /// Arguments for reading a wiki page
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct ReadWikiPageArgs {
     pub page_name: String,
 }
 
 /// Arguments for writing a wiki page
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct WriteWikiPageArgs {
     pub page_name: String,
     pub content: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mimetype: Option<String>,
+}
+
+/// Response for listing wiki pages
+#[derive(Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct ListWikiPagesResponse {
+    pub pages: Vec<String>,
+    pub count: usize,
+}
+
+/// Response for reading a wiki page
+#[derive(Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct ReadWikiPageResponse {
+    pub page_name: String,
+    pub content: String,
+}
+
+/// Response for writing a wiki page
+#[derive(Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct WriteWikiPageResponse {
+    pub success: bool,
+    pub page_name: String,
+    pub message: String,
 }
 
 #[cfg(test)]
