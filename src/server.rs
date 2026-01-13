@@ -1,12 +1,14 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use rmcp::{
-    handler::server::{tool::ToolRouter, wrapper::Parameters, ServerHandler},
+    handler::server::{wrapper::Parameters, ServerHandler},
     model::{ServerCapabilities, ServerInfo},
     tool, tool_router, Json,
 };
 
+use std::sync::Arc;
+use std::path::PathBuf;
 use tokio::process::Command;
-use crate::types::{ListWikiPagesArgs, ReadWikiPageArgs, WriteWikiPageArgs};
+use crate::server::types::{ReadWikiPageArgs, WriteWikiPageArgs};
 
 pub mod types;
 
@@ -20,7 +22,7 @@ pub fn parse_wiki_list(output: &str) -> Vec<String> {
 
 
 #[derive(Clone)]
-pub struct FossilWiki(Arc<PathBuf>),
+pub struct FossilWiki(#[allow(dead_code)] Arc<PathBuf>);
 
 #[tool_router]
 impl FossilWiki {
@@ -28,28 +30,30 @@ impl FossilWiki {
         Self(Arc::new(path))
     }
 
+    fn repository_path(&self) -> &PathBuf {
+        &self.0
+    }
+
     /// List all wiki pages in the Fossil repository
     #[tool(description = "List all wiki pages in the Fossil repository")]
-    async fn list_wiki_pages(
-        &self,
-    ) -> Result<Json<types::ListWikiPagesResponse>, String> {
+    async fn list_wiki_pages(&self) -> Result<Json<types::ListWikiPagesResponse>, String> {
         let output = Command::new("fossil")
             .arg("-R")
-            .arg(state.repository_path.as_ref())
+            .arg(self.repository_path())
             .args(["wiki", "list"])
             .output()
             .await
             .map_err(|e| e.to_string())?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("fossil wiki list failed: {}", stderr);
-    }
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("fossil wiki list failed: {}", stderr));
+        }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let pages = parse_wiki_list(&stdout);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let pages = parse_wiki_list(&stdout);
 
-        Ok(Json(result))
+        Ok(Json(types::ListWikiPagesResponse { pages }))
     }
 
     /// Read the content of a wiki page
@@ -58,10 +62,25 @@ impl FossilWiki {
         &self,
         args: Parameters<ReadWikiPageArgs>,
     ) -> Result<Json<types::ReadWikiPageResponse>, String> {
-        let result = handlers::read_wiki_page(args.0, self.state.clone())
+        let output = Command::new("fossil")
+            .arg("-R")
+            .arg(self.repository_path())
+            .args(["wiki", "export", &args.0.page_name])
+            .output()
             .await
             .map_err(|e| e.to_string())?;
-        Ok(Json(result))
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("fossil wiki export failed: {}", stderr));
+        }
+
+        let content = String::from_utf8_lossy(&output.stdout).to_string();
+
+        Ok(Json(types::ReadWikiPageResponse {
+            page_name: args.0.page_name,
+            content,
+        }))
     }
 
     /// Create or update a wiki page
@@ -70,14 +89,44 @@ impl FossilWiki {
         &self,
         args: Parameters<WriteWikiPageArgs>,
     ) -> Result<Json<types::WriteWikiPageResponse>, String> {
-        let result = handlers::write_wiki_page(args.0, self.state.clone())
+        // Write content to a temporary file
+        let temp_file = format!("/tmp/fossil_wiki_{}.txt", args.0.page_name.replace("/", "_"));
+        tokio::fs::write(&temp_file, &args.0.content)
             .await
-            .map_err(|e| e.to_string())?;
-        Ok(Json(result))
+            .map_err(|e| format!("Failed to write temporary file: {}", e))?;
+
+        // Build the command
+        let mut cmd = Command::new("fossil");
+        cmd.arg("-R")
+            .arg(self.repository_path())
+            .args(["wiki", "commit", &args.0.page_name, &temp_file]);
+
+        if let Some(ref mt) = args.0.mimetype {
+            cmd.arg(format!("--mimetype={}", mt));
+        }
+
+        let output = cmd
+            .output()
+            .await
+            .map_err(|e| format!("Failed to execute fossil wiki commit: {}", e))?;
+
+        // Clean up temp file
+        let _ = tokio::fs::remove_file(&temp_file).await;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("fossil wiki commit failed: {}", stderr));
+        }
+
+        Ok(Json(types::WriteWikiPageResponse {
+            success: true,
+            page_name: args.0.page_name,
+            message: "Wiki page written successfully".to_string(),
+        }))
     }
 }
 
-impl ServerHandler for FossilRouter {
+impl ServerHandler for FossilWiki {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             protocol_version: Default::default(),

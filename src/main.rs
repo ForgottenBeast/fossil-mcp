@@ -4,7 +4,7 @@ use rmcp::ServiceExt;
 use std::path::PathBuf;
 use tokio::io::{stdin, stdout};
 
-use fossil_mcp::{AppState, FossilRouter};
+use fossil_mcp::FossilWiki;
 
 /// Command-line arguments for the MCP server
 #[derive(Parser, Debug)]
@@ -31,17 +31,14 @@ async fn main() -> Result<()> {
         anyhow::bail!("Repository file does not exist: {:?}", args.repository);
     }
 
-    // Create shared state
-    let state = AppState::new(args.repository);
-
-    // Create the router
-    let router = FossilRouter::new(state);
+    // Create the wiki handler
+    let wiki = FossilWiki::new(args.repository);
 
     // Create transport from stdin/stdout
     let transport = (stdin(), stdout());
 
     // Serve the MCP server
-    let server = router.serve(transport).await?;
+    let server = wiki.serve(transport).await?;
 
     // Wait for the server to complete
     server.waiting().await?;

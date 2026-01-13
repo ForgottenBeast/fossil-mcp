@@ -5,16 +5,13 @@
 //!
 //! ## Modules
 //!
-//! - `state`: Application state management
-//! - `types`: Type definitions for tool arguments
-//! - `handlers`: MCP tool handler implementations
-//! - `server`: MCP router implementation
+//! - `server`: MCP server implementation with FossilWiki handler
 
 pub mod server;
 
 // Re-export commonly used types for convenience
 pub use server::FossilWiki;
 pub use server::types::{
-    ListWikiPagesArgs, ListWikiPagesResponse, ReadWikiPageArgs, ReadWikiPageResponse,
+    ReadWikiPageArgs, ReadWikiPageResponse,
     WriteWikiPageArgs, WriteWikiPageResponse,
 };
