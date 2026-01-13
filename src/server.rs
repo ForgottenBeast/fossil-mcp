@@ -36,11 +36,9 @@ impl FossilWiki {
 
     /// List all wiki pages in the Fossil repository
     #[tool(description = "List all wiki pages in the Fossil repository")]
-    async fn list_wiki_pages(&self) -> Result<Json<types::ListWikiPagesResponse>, String> {
+    pub async fn list_wiki_pages(&self) -> Result<Json<types::ListWikiPagesResponse>, String> {
         let output = Command::new("fossil")
-            .arg("-R")
-            .arg(self.repository_path())
-            .args(["wiki", "list"])
+            .args(["wiki", "-R", &self.repository_path().to_string_lossy(), "list"])
             .output()
             .await
             .map_err(|e| e.to_string())?;
@@ -58,14 +56,12 @@ impl FossilWiki {
 
     /// Read the content of a wiki page
     #[tool(description = "Read the content of a wiki page")]
-    async fn read_wiki_page(
+    pub async fn read_wiki_page(
         &self,
         args: Parameters<ReadWikiPageArgs>,
     ) -> Result<Json<types::ReadWikiPageResponse>, String> {
         let output = Command::new("fossil")
-            .arg("-R")
-            .arg(self.repository_path())
-            .args(["wiki", "export", &args.0.page_name])
+            .args(["wiki", "-R", &self.repository_path().to_string_lossy(), "export", &args.0.page_name])
             .output()
             .await
             .map_err(|e| e.to_string())?;
@@ -75,7 +71,8 @@ impl FossilWiki {
             return Err(format!("fossil wiki export failed: {}", stderr));
         }
 
-        let content = String::from_utf8_lossy(&output.stdout).to_string();
+        let content = String::from_utf8_lossy(&output.stdout);
+        let content = content.trim_end_matches('\n').to_string();
 
         Ok(Json(types::ReadWikiPageResponse {
             page_name: args.0.page_name,
@@ -85,7 +82,7 @@ impl FossilWiki {
 
     /// Create or update a wiki page
     #[tool(description = "Create or update a wiki page")]
-    async fn write_wiki_page(
+    pub async fn write_wiki_page(
         &self,
         args: Parameters<WriteWikiPageArgs>,
     ) -> Result<Json<types::WriteWikiPageResponse>, String> {
@@ -98,14 +95,9 @@ impl FossilWiki {
             .await
             .map_err(|e| format!("Failed to write temporary file: {}", e))?;
 
-        // Build the command
+        // Try "create" first, then "commit" if it fails (for existing pages)
         let mut cmd = Command::new("fossil");
-        cmd.arg("-R").arg(self.repository_path()).args([
-            "wiki",
-            "commit",
-            &args.0.page_name,
-            &temp_file,
-        ]);
+        cmd.args(["wiki", "-R", &self.repository_path().to_string_lossy(), "create", &args.0.page_name, &temp_file]);
 
         if let Some(ref mt) = args.0.mimetype {
             cmd.arg(format!("--mimetype={}", mt));
@@ -114,14 +106,33 @@ impl FossilWiki {
         let output = cmd
             .output()
             .await
-            .map_err(|e| format!("Failed to execute fossil wiki commit: {}", e))?;
+            .map_err(|e| format!("Failed to execute fossil wiki create: {}", e))?;
+
+        // If create failed with "already exists" or similar, try commit
+        let mut final_output = output;
+        if !final_output.status.success() {
+            let stderr_str = String::from_utf8_lossy(&final_output.stderr);
+            if stderr_str.contains("already exists") || stderr_str.contains("exists") {
+                let mut cmd = Command::new("fossil");
+                cmd.args(["wiki", "-R", &self.repository_path().to_string_lossy(), "commit", &args.0.page_name, &temp_file]);
+
+                if let Some(ref mt) = args.0.mimetype {
+                    cmd.arg(format!("--mimetype={}", mt));
+                }
+
+                final_output = cmd
+                    .output()
+                    .await
+                    .map_err(|e| format!("Failed to execute fossil wiki commit: {}", e))?;
+            }
+        }
 
         // Clean up temp file
         let _ = tokio::fs::remove_file(&temp_file).await;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("fossil wiki commit failed: {}", stderr));
+        if !final_output.status.success() {
+            let stderr = String::from_utf8_lossy(&final_output.stderr);
+            return Err(format!("fossil wiki operation failed: {}", stderr));
         }
 
         Ok(Json(types::WriteWikiPageResponse {
@@ -140,5 +151,66 @@ impl ServerHandler for FossilWiki {
             server_info: Default::default(),
             instructions: Some("MCP server for accessing Fossil SCM wiki pages".to_string()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_wiki_list_empty() {
+        let output = "";
+        let pages = parse_wiki_list(output);
+        assert_eq!(pages, Vec::<String>::new());
+    }
+
+    #[test]
+    fn test_parse_wiki_list_single_page() {
+        let output = "HomePage";
+        let pages = parse_wiki_list(output);
+        assert_eq!(pages, vec!["HomePage"]);
+    }
+
+    #[test]
+    fn test_parse_wiki_list_multiple_pages() {
+        let output = "HomePage\nAbout\nDocumentation";
+        let pages = parse_wiki_list(output);
+        assert_eq!(pages, vec!["HomePage", "About", "Documentation"]);
+    }
+
+    #[test]
+    fn test_parse_wiki_list_with_whitespace() {
+        let output = "  HomePage  \n  About  \n  Documentation  ";
+        let pages = parse_wiki_list(output);
+        assert_eq!(pages, vec!["HomePage", "About", "Documentation"]);
+    }
+
+    #[test]
+    fn test_parse_wiki_list_with_empty_lines() {
+        let output = "HomePage\n\nAbout\n\n\nDocumentation\n";
+        let pages = parse_wiki_list(output);
+        assert_eq!(pages, vec!["HomePage", "About", "Documentation"]);
+    }
+
+    #[test]
+    fn test_parse_wiki_list_with_special_characters() {
+        let output = "HomePage\nAbout-Us\nUser_Guide\nFAQ";
+        let pages = parse_wiki_list(output);
+        assert_eq!(pages, vec!["HomePage", "About-Us", "User_Guide", "FAQ"]);
+    }
+
+    #[test]
+    fn test_parse_wiki_list_with_slashes() {
+        let output = "HomePage\nDocs/API\nDocs/CLI\nDocs/Web-UI";
+        let pages = parse_wiki_list(output);
+        assert_eq!(pages, vec!["HomePage", "Docs/API", "Docs/CLI", "Docs/Web-UI"]);
+    }
+
+    #[test]
+    fn test_fossil_wiki_creation() {
+        let path = std::path::PathBuf::from("/tmp/test.fossil");
+        let wiki = FossilWiki::new(path.clone());
+        assert_eq!(wiki.repository_path(), &path);
     }
 }
