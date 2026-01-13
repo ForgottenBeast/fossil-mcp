@@ -1,7 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
-use mcp_server::router::RouterService;
-use mcp_server::{ByteTransport, Server};
+use rmcp::ServiceExt;
 use std::path::PathBuf;
 use tokio::io::{stdin, stdout};
 
@@ -38,17 +37,14 @@ async fn main() -> Result<()> {
     // Create the router
     let router = FossilRouter::new(state);
 
-    // Wrap in RouterService
-    let service = RouterService(router);
-
-    // Create the server
-    let server = Server::new(service);
-
     // Create transport from stdin/stdout
-    let transport = ByteTransport::new(stdin(), stdout());
+    let transport = (stdin(), stdout());
 
-    // Run the server
-    server.run(transport).await?;
+    // Serve the MCP server
+    let server = router.serve(transport).await?;
+
+    // Wait for the server to complete
+    server.waiting().await?;
 
     Ok(())
 }
