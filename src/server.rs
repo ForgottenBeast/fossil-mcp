@@ -1,14 +1,15 @@
 use anyhow::Result;
 use rmcp::{
-    handler::server::{wrapper::Parameters, ServerHandler},
+    Json,
+    handler::server::{ServerHandler, wrapper::Parameters},
     model::{ServerCapabilities, ServerInfo},
-    tool, tool_router, Json,
+    tool, tool_router,
 };
 
-use std::sync::Arc;
-use std::path::PathBuf;
-use tokio::process::Command;
 use crate::server::types::{ReadWikiPageArgs, WriteWikiPageArgs};
+use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::process::Command;
 
 pub mod types;
 
@@ -19,7 +20,6 @@ pub fn parse_wiki_list(output: &str) -> Vec<String> {
         .filter(|line| !line.is_empty())
         .collect()
 }
-
 
 #[derive(Clone)]
 pub struct FossilWiki(#[allow(dead_code)] Arc<PathBuf>);
@@ -90,16 +90,22 @@ impl FossilWiki {
         args: Parameters<WriteWikiPageArgs>,
     ) -> Result<Json<types::WriteWikiPageResponse>, String> {
         // Write content to a temporary file
-        let temp_file = format!("/tmp/fossil_wiki_{}.txt", args.0.page_name.replace("/", "_"));
+        let temp_file = format!(
+            "/tmp/fossil_wiki_{}.txt",
+            args.0.page_name.replace("/", "_")
+        );
         tokio::fs::write(&temp_file, &args.0.content)
             .await
             .map_err(|e| format!("Failed to write temporary file: {}", e))?;
 
         // Build the command
         let mut cmd = Command::new("fossil");
-        cmd.arg("-R")
-            .arg(self.repository_path())
-            .args(["wiki", "commit", &args.0.page_name, &temp_file]);
+        cmd.arg("-R").arg(self.repository_path()).args([
+            "wiki",
+            "commit",
+            &args.0.page_name,
+            &temp_file,
+        ]);
 
         if let Some(ref mt) = args.0.mimetype {
             cmd.arg(format!("--mimetype={}", mt));
