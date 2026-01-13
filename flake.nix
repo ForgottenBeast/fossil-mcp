@@ -70,6 +70,7 @@
               ])
               pkgs.cmake
               pkgs.gcc
+              pkgs.fossil
             ];
 
             shellHook = ''
