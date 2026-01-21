@@ -1,9 +1,9 @@
 use anyhow::Result;
 use rmcp::{
     Json,
-    handler::server::{ServerHandler, wrapper::Parameters},
+    handler::server::{ServerHandler, tool::ToolRouter, wrapper::Parameters},
     model::{ServerCapabilities, ServerInfo},
-    tool, tool_router,
+    tool, tool_handler, tool_router,
 };
 
 use crate::server::types::{ReadWikiPageArgs, WriteWikiPageArgs};
@@ -22,16 +22,22 @@ pub fn parse_wiki_list(output: &str) -> Vec<String> {
 }
 
 #[derive(Clone)]
-pub struct FossilWiki(#[allow(dead_code)] Arc<PathBuf>);
+pub struct FossilWiki {
+    repository: Arc<PathBuf>,
+    tool_router: ToolRouter<Self>,
+}
 
 #[tool_router]
 impl FossilWiki {
     pub fn new(path: PathBuf) -> Self {
-        Self(Arc::new(path))
+        Self {
+            repository: Arc::new(path),
+            tool_router: Self::tool_router(),
+        }
     }
 
     fn repository_path(&self) -> &PathBuf {
-        &self.0
+        &self.repository
     }
 
     /// List all wiki pages in the Fossil repository
@@ -143,6 +149,7 @@ impl FossilWiki {
     }
 }
 
+#[tool_handler]
 impl ServerHandler for FossilWiki {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
