@@ -82,11 +82,67 @@ Configuration file location: `~/Library/Application Support/Claude/claude_deskto
 
 ## Tool Interface
 
-**list_wiki_pages** - No parameters. Returns `{pages: string[], count: number}`
+### list_wiki_pages
+No parameters. Returns all wiki page names in the repository.
 
-**read_wiki_page** - Requires `page_name: string`. Returns `{page_name: string, content: string}`
+**Response**: `{pages: string[]}`
 
-**write_wiki_page** - Requires `page_name: string`, `content: string`. Optional: `mimetype: "text/x-fossil-wiki" | "text/x-markdown" | "text/plain"`. Returns `{success: bool, page_name: string, message: string}`
+### read_wiki_page
+Reads the content of a wiki page.
+
+**Parameters**:
+- `page_name` (string, required): Name of the page to read
+
+**Response**: `{page_name: string, content: string}`
+
+### write_wiki_page
+Creates or updates a wiki page with optional repository synchronization.
+
+**Parameters**:
+- `page_name` (string, required): Name of the page to write
+- `content` (string, required): Content for the page
+- `mimetype` (string, optional): MIME type for the page (e.g., `"text/x-fossil-wiki"`, `"text/x-markdown"`, `"text/plain"`)
+- `skip_sync` (boolean, optional, default: `false`): If `true`, skip repository synchronization after writing
+- `force_write` (boolean, optional, default: `false`): If `true`, allow write to succeed even if sync fails with a merge conflict
+
+**Sync Behavior**:
+- When `skip_sync` is `false`, the repository will synchronize with remote after the page is written
+- Merge conflicts are blocking errors that prevent the operation unless `force_write` is `true`
+- Network errors and missing remote configuration are non-blocking and don't prevent the page write
+- The response includes a `sync_status` field describing the synchronization outcome
+
+**Response**:
+```json
+{
+  "success": bool,
+  "page_name": string,
+  "message": string,
+  "sync_status": {
+    "attempted": bool,
+    "succeeded": bool,
+    "error_type": string | null,
+    "error_message": string | null,
+    "can_force_write": bool
+  } | null
+}
+```
+
+**Sync Error Types**:
+- `MergeConflict`: Merge conflict occurred (blocking, can retry with `force_write: true`)
+- `NoRemoteConfigured`: No remote repository is configured (non-blocking)
+- `NetworkError`: Network connectivity issue (non-blocking)
+- `Other`: Other synchronization error (non-blocking)
+
+**Example Usage**:
+```json
+{
+  "page_name": "API/v2/Reference",
+  "content": "# API Documentation\n\n...",
+  "mimetype": "text/x-markdown",
+  "skip_sync": false,
+  "force_write": false
+}
+```
 
 ## Nix Flake Configuration
 
