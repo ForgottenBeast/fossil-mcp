@@ -126,7 +126,54 @@ impl FossilWiki {
         }))
     }
 
-    /// Create or update a wiki page
+    /// Create or update a wiki page in the repository.
+    ///
+    /// # Behavior
+    /// 1. Writes the provided content to the wiki page
+    /// 2. If `skip_sync` is false, attempts to synchronize with the remote repository
+    /// 3. Reports page write success and synchronization status in the response
+    ///
+    /// # Parameters
+    /// - `page_name`: Name of the page (e.g., "HomePage", "Docs/API")
+    /// - `content`: The page content to write
+    /// - `mimetype`: Optional MIME type (e.g., "text/x-markdown")
+    /// - `skip_sync`: If true, skip repository synchronization (default: false)
+    /// - `force_write`: If true, allow success even with blocking sync errors (default: false)
+    ///
+    /// # Return Values
+    /// - Always returns `Ok` if the page write succeeds (regardless of sync outcome)
+    /// - Returns `Err` only if the page write fails or sync fails with a blocking error and `force_write` is false
+    ///
+    /// # Errors
+    /// - Page write fails (insufficient permissions, file system errors)
+    /// - Sync fails with a merge conflict AND `force_write` is false
+    ///
+    /// # Sync Failures (Non-blocking)
+    /// These are reported in the response but do not cause the operation to fail:
+    /// - No remote repository configured
+    /// - Network connectivity issues
+    ///
+    /// # Example Usage
+    /// ```no_run
+    /// # use fossil_mcp::{FossilWiki, WriteWikiPageArgs};
+    /// # use rmcp::handler::server::wrapper::Parameters;
+    /// # use std::path::PathBuf;
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// let wiki = FossilWiki::new(PathBuf::from("/path/to/repo.fossil"));
+    /// let args = Parameters(WriteWikiPageArgs {
+    ///     page_name: "HomePage".to_string(),
+    ///     content: "Welcome to the wiki".to_string(),
+    ///     mimetype: Some("text/x-fossil-wiki".to_string()),
+    ///     skip_sync: false,
+    ///     force_write: false,
+    /// });
+    /// match wiki.write_wiki_page(args).await {
+    ///     Ok(response) => println!("Page written: {}", response.0.success),
+    ///     Err(e) => eprintln!("Error: {}", e),
+    /// }
+    /// # }
+    /// ```
     #[tool(description = "Create or update a wiki page")]
     pub async fn write_wiki_page(
         &self,
