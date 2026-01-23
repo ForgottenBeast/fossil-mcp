@@ -1,6 +1,10 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+fn is_false(value: &bool) -> bool {
+    !value
+}
+
 /// Arguments for reading a wiki page
 #[derive(Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct ReadWikiPageArgs {
@@ -14,6 +18,10 @@ pub struct WriteWikiPageArgs {
     pub content: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mimetype: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub skip_sync: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub force_write: bool,
 }
 
 /// Response for listing wiki pages
@@ -63,6 +71,8 @@ mod tests {
             page_name: "Test".to_string(),
             content: "Content".to_string(),
             mimetype: Some("text/x-markdown".to_string()),
+            skip_sync: false,
+            force_write: false,
         };
         let json = serde_json::to_string(&args).unwrap();
         assert!(json.contains("text/x-markdown"));
@@ -74,6 +84,8 @@ mod tests {
             page_name: "Test".to_string(),
             content: "Content".to_string(),
             mimetype: None,
+            skip_sync: false,
+            force_write: false,
         };
         let json = serde_json::to_string(&args).unwrap();
         assert!(!json.contains("mimetype"));
@@ -84,5 +96,47 @@ mod tests {
         let json = r#"{"page_name":"Test","content":"Content"}"#;
         let args: WriteWikiPageArgs = serde_json::from_str(json).unwrap();
         assert_eq!(args.mimetype, None);
+        assert_eq!(args.skip_sync, false);
+        assert_eq!(args.force_write, false);
+    }
+
+    #[test]
+    fn test_write_wiki_page_args_with_skip_sync() {
+        let args = WriteWikiPageArgs {
+            page_name: "Test".to_string(),
+            content: "Content".to_string(),
+            mimetype: None,
+            skip_sync: true,
+            force_write: false,
+        };
+        let json = serde_json::to_string(&args).unwrap();
+        assert!(json.contains("skip_sync"));
+    }
+
+    #[test]
+    fn test_write_wiki_page_args_with_force_write() {
+        let args = WriteWikiPageArgs {
+            page_name: "Test".to_string(),
+            content: "Content".to_string(),
+            mimetype: None,
+            skip_sync: false,
+            force_write: true,
+        };
+        let json = serde_json::to_string(&args).unwrap();
+        assert!(json.contains("force_write"));
+    }
+
+    #[test]
+    fn test_write_wiki_page_args_skip_false_fields() {
+        let args = WriteWikiPageArgs {
+            page_name: "Test".to_string(),
+            content: "Content".to_string(),
+            mimetype: None,
+            skip_sync: false,
+            force_write: false,
+        };
+        let json = serde_json::to_string(&args).unwrap();
+        assert!(!json.contains("skip_sync"));
+        assert!(!json.contains("force_write"));
     }
 }
