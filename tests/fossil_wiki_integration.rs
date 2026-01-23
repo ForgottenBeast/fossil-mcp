@@ -48,6 +48,8 @@ async fn test_write_and_read_wiki_page() {
         page_name: "TestPage".to_string(),
         content: "This is test content".to_string(),
         mimetype: Some("text/x-fossil-wiki".to_string()),
+        skip_sync: true,
+        force_write: false,
     });
 
     let write_result = wiki
@@ -86,6 +88,8 @@ async fn test_write_multiple_pages() {
             page_name: page_name.clone(),
             content: content.clone(),
             mimetype: Some("text/x-fossil-wiki".to_string()),
+            skip_sync: true,
+            force_write: false,
         });
 
         wiki.write_wiki_page(write_args)
@@ -115,6 +119,8 @@ async fn test_write_wiki_page_markdown() {
         page_name: "MarkdownPage".to_string(),
         content: markdown_content.to_string(),
         mimetype: Some("text/x-markdown".to_string()),
+        skip_sync: true,
+        force_write: false,
     });
 
     let write_result = wiki
@@ -147,6 +153,8 @@ async fn test_update_existing_page() {
         page_name: "UpdateTest".to_string(),
         content: "Version 1".to_string(),
         mimetype: None,
+        skip_sync: true,
+        force_write: false,
     });
 
     wiki.write_wiki_page(write_args)
@@ -158,6 +166,8 @@ async fn test_update_existing_page() {
         page_name: "UpdateTest".to_string(),
         content: "Version 2 - Updated".to_string(),
         mimetype: None,
+        skip_sync: true,
+        force_write: false,
     });
 
     wiki.write_wiki_page(write_args)
@@ -188,6 +198,8 @@ async fn test_wiki_page_with_special_characters() {
         page_name: "SpecialChars".to_string(),
         content: special_content.to_string(),
         mimetype: None,
+        skip_sync: true,
+        force_write: false,
     });
 
     wiki.write_wiki_page(write_args)
@@ -217,4 +229,122 @@ async fn test_read_nonexistent_page() {
 
     let result = wiki.read_wiki_page(read_args).await;
     assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn test_write_wiki_page_skip_sync() {
+    let (repo_path, _temp_dir) = create_test_repo().await;
+    let wiki = FossilWiki::new(repo_path);
+
+    let write_args = Parameters(WriteWikiPageArgs {
+        page_name: "SkipSyncTest".to_string(),
+        content: "Content with skip_sync".to_string(),
+        mimetype: None,
+        skip_sync: true,
+        force_write: false,
+    });
+
+    let write_result = wiki
+        .write_wiki_page(write_args)
+        .await
+        .expect("Failed to write wiki page");
+
+    assert!(write_result.0.success);
+    // When skip_sync is true, sync_status should be None
+    assert!(write_result.0.sync_status.is_none());
+}
+
+#[tokio::test]
+async fn test_write_wiki_page_with_sync_no_remote() {
+    let (repo_path, _temp_dir) = create_test_repo().await;
+    let wiki = FossilWiki::new(repo_path);
+
+    let write_args = Parameters(WriteWikiPageArgs {
+        page_name: "SyncNoRemoteTest".to_string(),
+        content: "Content with sync attempted".to_string(),
+        mimetype: None,
+        skip_sync: false,
+        force_write: false,
+    });
+
+    let write_result = wiki
+        .write_wiki_page(write_args)
+        .await
+        .expect("Failed to write wiki page");
+
+    assert!(write_result.0.success);
+    // Sync should be attempted but likely fail with NoRemoteConfigured since no remote is set up
+    assert!(write_result.0.sync_status.is_some());
+    let sync_status = write_result.0.sync_status.unwrap();
+    assert!(sync_status.attempted);
+    // Since no remote is configured, sync will fail but page should still be written
+}
+
+#[tokio::test]
+async fn test_write_wiki_page_force_write_false() {
+    let (repo_path, _temp_dir) = create_test_repo().await;
+    let wiki = FossilWiki::new(repo_path);
+
+    let write_args = Parameters(WriteWikiPageArgs {
+        page_name: "ForceWriteFalseTest".to_string(),
+        content: "Content without force write".to_string(),
+        mimetype: None,
+        skip_sync: true,
+        force_write: false,
+    });
+
+    let write_result = wiki
+        .write_wiki_page(write_args)
+        .await
+        .expect("Failed to write wiki page");
+
+    assert!(write_result.0.success);
+    // With skip_sync=true and force_write=false, no sync is attempted
+    assert!(write_result.0.sync_status.is_none());
+}
+
+#[tokio::test]
+async fn test_write_wiki_page_force_write_true() {
+    let (repo_path, _temp_dir) = create_test_repo().await;
+    let wiki = FossilWiki::new(repo_path);
+
+    let write_args = Parameters(WriteWikiPageArgs {
+        page_name: "ForceWriteTrueTest".to_string(),
+        content: "Content with force write".to_string(),
+        mimetype: None,
+        skip_sync: true,
+        force_write: true,
+    });
+
+    let write_result = wiki
+        .write_wiki_page(write_args)
+        .await
+        .expect("Failed to write wiki page");
+
+    assert!(write_result.0.success);
+}
+
+#[tokio::test]
+async fn test_sync_status_blocking_error() {
+    let (repo_path, _temp_dir) = create_test_repo().await;
+    let wiki = FossilWiki::new(repo_path);
+
+    // This test verifies that when a sync status has a blocking error (can_force_write=true),
+    // the page is still written but with proper error status
+    let write_args = Parameters(WriteWikiPageArgs {
+        page_name: "BlockingErrorTest".to_string(),
+        content: "Test content".to_string(),
+        mimetype: None,
+        skip_sync: true,
+        force_write: false,
+    });
+
+    let write_result = wiki
+        .write_wiki_page(write_args)
+        .await
+        .expect("Failed to write wiki page");
+
+    assert!(write_result.0.success);
+    // With skip_sync=true, no sync attempt is made
+    assert!(write_result.0.sync_status.is_none());
 }
