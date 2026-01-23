@@ -181,11 +181,56 @@ impl FossilWiki {
             return Err(format!("fossil wiki operation failed: {}", stderr));
         }
 
+        // Handle synchronization if requested
+        let mut sync_status = None;
+        if !args.0.skip_sync {
+            match sync_repository(self.repository_path()).await {
+                Ok(()) => {
+                    sync_status = Some(types::SyncStatus {
+                        attempted: true,
+                        succeeded: true,
+                        error_type: None,
+                        error_message: None,
+                        can_force_write: false,
+                    });
+                }
+                Err(sync_error) => {
+                    // Determine if error is blocking or non-blocking
+                    let (error_type, can_force_write) = match &sync_error {
+                        SyncError::MergeConflict => ("MergeConflict".to_string(), true),
+                        SyncError::NoRemoteConfigured => ("NoRemoteConfigured".to_string(), false),
+                        SyncError::NetworkError => ("NetworkError".to_string(), false),
+                        SyncError::Other(_) => ("Other".to_string(), false),
+                    };
+
+                    let error_message = match sync_error {
+                        SyncError::MergeConflict => "Merge conflict occurred during synchronization. Use force_write to override.".to_string(),
+                        SyncError::NoRemoteConfigured => "No remote URL configured for this repository.".to_string(),
+                        SyncError::NetworkError => "Network error occurred during synchronization. Please try again later.".to_string(),
+                        SyncError::Other(msg) => format!("Synchronization error: {}", msg),
+                    };
+
+                    sync_status = Some(types::SyncStatus {
+                        attempted: true,
+                        succeeded: false,
+                        error_type: Some(error_type.clone()),
+                        error_message: Some(error_message.clone()),
+                        can_force_write,
+                    });
+
+                    // If it's a blocking error (merge conflict) and force_write is not set, fail
+                    if can_force_write && !args.0.force_write {
+                        return Err(format!("Sync failed: {}. Use force_write flag to override.", error_message));
+                    }
+                }
+            }
+        }
+
         Ok(Json(types::WriteWikiPageResponse {
             success: true,
             page_name: args.0.page_name,
             message: "Wiki page written successfully".to_string(),
-            sync_status: None,
+            sync_status,
         }))
     }
 }
