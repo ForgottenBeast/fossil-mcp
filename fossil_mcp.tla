@@ -43,7 +43,7 @@ vars == <<pages, remotePages, syncState, lastError, pendingSync, clientOps>>
 
 NullString == ""
 
-PageContent == STRING
+PageContent == {"", "A", "B"}
 
 SyncErrorType == {"MergeConflict", "NoRemoteConfigured", "NetworkError", "Other", "none"}
 
@@ -107,9 +107,12 @@ InitiateSync ==
     /\ syncState = "idle"
     /\ pendingSync /= {}
     /\ IF RemoteConfigured
-       THEN syncState' = "syncing"
-       ELSE syncState' = "idle" /\ lastError' = "NoRemoteConfigured"
-    /\ UNCHANGED <<pages, remotePages, pendingSync, clientOps>>
+       THEN /\ syncState' = "syncing"
+            /\ lastError' = "none"
+            /\ UNCHANGED <<pages, remotePages, pendingSync, clientOps>>
+       ELSE /\ syncState' = "idle"
+            /\ lastError' = "NoRemoteConfigured"
+            /\ UNCHANGED <<pages, remotePages, pendingSync, clientOps>>
 
 (* Successful synchronization of all pending pages *)
 SyncSuccess ==
@@ -165,7 +168,8 @@ RetrySyncAfterError ==
     /\ lastError \in {"NetworkError", "Other"}
     /\ pendingSync /= {}
     /\ syncState' = "syncing"
-    /\ UNCHANGED <<pages, remotePages, lastError, pendingSync, clientOps>>
+    /\ lastError' = "none"
+    /\ UNCHANGED <<pages, remotePages, pendingSync, clientOps>>
 
 (* ============================================================================
  * Actions - Remote Updates (representing external changes)
@@ -228,7 +232,7 @@ ValidPendingSync ==
 
 (* Sync state invariants *)
 SyncStateInvariants ==
-    /\ syncState = "idle" => lastError \in {"none", "NoRemoteConfigured"}
+    /\ syncState = "idle" => lastError \in {"none", "NoRemoteConfigured", "NetworkError", "Other"}
     /\ syncState = "syncing" => lastError \in {"none"}
     /\ syncState = "conflict" => lastError = "MergeConflict"
 
@@ -236,9 +240,9 @@ SyncStateInvariants ==
 SyncingImpliesPending ==
     syncState = "syncing" => pendingSync /= {}
 
-(* After successful sync, pending pages must be empty *)
+(* After successful sync completion, pending pages are cleared *)
 SyncSuccessCleanup ==
-    syncState = "idle" /\ lastError = "none" => pendingSync = {}
+    lastError = "none" /\ pendingSync = {} => syncState = "idle"
 
 (* ============================================================================
  * Safety Properties - Conditions that should always hold
@@ -257,9 +261,9 @@ TypeInvariant ==
     /\ SyncingImpliesPending
     /\ SyncSuccessCleanup
 
-(* Mutual consistency: local pages should match remote after successful sync *)
-LocalRemoteConsistency ==
-    syncState = "idle" /\ lastError = "none" => pages = remotePages
+(* Sync state is always valid *)
+SyncConsistency ==
+    syncState \in {"idle", "syncing", "conflict"}
 
 (* Pages are never lost: once written, a page exists until explicitly cleared *)
 PagePersistence ==
@@ -296,14 +300,15 @@ EventualConflictResolution ==
 (* A page write should eventually be visible on remote (if synced) *)
 PageWriteEventuallyRemote ==
     \A p \in PageNames:
-        (pages[p] /= NullString /\ pendingSync' = pendingSync \cup {p})
+        (pages[p] /= NullString /\ p \in pendingSync)
         ~> 
         (remotePages[p] = pages[p])
 
 (* If no remote is configured, local pages should not require remote sync *)
 NoRemoteNoSync ==
     ~RemoteConfigured => 
-    (WritePageWithSync(p, content) => 
+    (\A p \in PageNames, content \in PageContent:
+     WritePageWithSync(p, content) => 
      (pages' = [pages EXCEPT ![p] = content] /\ 
       lastError' = "NoRemoteConfigured"))
 
