@@ -37,12 +37,32 @@ pub struct ReadWikiPageResponse {
     pub content: String,
 }
 
+/// Status of a synchronization operation
+#[derive(Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct SyncStatus {
+    /// Whether a sync was attempted
+    pub attempted: bool,
+    /// Whether the sync succeeded
+    pub succeeded: bool,
+    /// Type of error that occurred (if any)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_type: Option<String>,
+    /// Human-readable error message (if any)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+    /// Whether the operation can be retried with force_write
+    pub can_force_write: bool,
+}
+
 /// Response for writing a wiki page
 #[derive(Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct WriteWikiPageResponse {
     pub success: bool,
     pub page_name: String,
     pub message: String,
+    /// Optional sync status information
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync_status: Option<SyncStatus>,
 }
 
 #[cfg(test)]
@@ -138,5 +158,98 @@ mod tests {
         let json = serde_json::to_string(&args).unwrap();
         assert!(!json.contains("skip_sync"));
         assert!(!json.contains("force_write"));
+    }
+
+    #[test]
+    fn test_sync_status_creation() {
+        let status = SyncStatus {
+            attempted: true,
+            succeeded: true,
+            error_type: None,
+            error_message: None,
+            can_force_write: false,
+        };
+        assert_eq!(status.attempted, true);
+        assert_eq!(status.succeeded, true);
+        assert_eq!(status.error_type, None);
+        assert_eq!(status.error_message, None);
+        assert_eq!(status.can_force_write, false);
+    }
+
+    #[test]
+    fn test_sync_status_with_error() {
+        let status = SyncStatus {
+            attempted: true,
+            succeeded: false,
+            error_type: Some("MergeConflict".to_string()),
+            error_message: Some("Conflict in file A".to_string()),
+            can_force_write: true,
+        };
+        assert_eq!(status.attempted, true);
+        assert_eq!(status.succeeded, false);
+        assert_eq!(status.error_type, Some("MergeConflict".to_string()));
+        assert_eq!(status.error_message, Some("Conflict in file A".to_string()));
+        assert_eq!(status.can_force_write, true);
+    }
+
+    #[test]
+    fn test_sync_status_serialize() {
+        let status = SyncStatus {
+            attempted: true,
+            succeeded: true,
+            error_type: None,
+            error_message: None,
+            can_force_write: false,
+        };
+        let json = serde_json::to_string(&status).unwrap();
+        assert!(json.contains("attempted"));
+        assert!(json.contains("succeeded"));
+        assert!(!json.contains("error_type"));
+        assert!(!json.contains("error_message"));
+    }
+
+    #[test]
+    fn test_sync_status_serialize_with_error() {
+        let status = SyncStatus {
+            attempted: true,
+            succeeded: false,
+            error_type: Some("NetworkError".to_string()),
+            error_message: Some("Connection timeout".to_string()),
+            can_force_write: false,
+        };
+        let json = serde_json::to_string(&status).unwrap();
+        assert!(json.contains("NetworkError"));
+        assert!(json.contains("Connection timeout"));
+    }
+
+    #[test]
+    fn test_write_wiki_page_response_without_sync_status() {
+        let response = WriteWikiPageResponse {
+            success: true,
+            page_name: "Test".to_string(),
+            message: "Success".to_string(),
+            sync_status: None,
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(!json.contains("sync_status"));
+    }
+
+    #[test]
+    fn test_write_wiki_page_response_with_sync_status() {
+        let status = SyncStatus {
+            attempted: true,
+            succeeded: true,
+            error_type: None,
+            error_message: None,
+            can_force_write: false,
+        };
+        let response = WriteWikiPageResponse {
+            success: true,
+            page_name: "Test".to_string(),
+            message: "Success".to_string(),
+            sync_status: Some(status),
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains("sync_status"));
     }
 }

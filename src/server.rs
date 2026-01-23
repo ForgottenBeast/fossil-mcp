@@ -185,6 +185,7 @@ impl FossilWiki {
             success: true,
             page_name: args.0.page_name,
             message: "Wiki page written successfully".to_string(),
+            sync_status: None,
         }))
     }
 }
