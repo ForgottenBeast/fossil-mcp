@@ -70,6 +70,7 @@
               ])
               pkgs.jq
               pkgs.fossil
+              pkgs.tlaplus18
             ];
 
             shellHook = ''
