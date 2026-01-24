@@ -3,9 +3,16 @@ EXTENDS Naturals, Sequences, TLC
 
 CONSTANT Users, Pages
 
+\* WikiSync extends WikiSimple with synchronization tracking
+\* Variables from WikiSimple: pages, history, depth
+\* New variables for WikiSync: remote, synced
 VARIABLE pages, remote, synced, history, depth
 
 WS == INSTANCE WikiSimple
+
+\* ============================================================================
+\* TYPE INVARIANT
+\* ============================================================================
 
 TypeOK ==
     /\ pages \in [Pages -> Pages]
@@ -13,6 +20,10 @@ TypeOK ==
     /\ synced \in [Pages -> BOOLEAN]
     /\ history \in Seq([op: {"read", "write", "sync"}, user: Users \cup {"system"}, page: Pages])
     /\ depth \in 0..10
+
+\* ============================================================================
+\* SYNC CONSISTENCY INVARIANTS
+\* ============================================================================
 
 \* Synced pages have matching local and remote content (when not modified)
 \* If pages differ from remote, the page must be marked as unsynced
@@ -29,10 +40,18 @@ OperationConsistent ==
 PagesComplete ==
     \A page \in Pages: page \in DOMAIN pages /\ page \in DOMAIN remote
 
+\* ============================================================================
+\* LIVENESS PROPERTIES
+\* ============================================================================
+
 \* Liveness: all pages eventually get synced
 \* Note: In a system without depth limits and with fair scheduling, this would hold
 AllPagesSyncEventually ==
     \A page \in Pages: []<> synced[page]
+
+\* ============================================================================
+\* INITIALIZATION
+\* ============================================================================
 
 Init ==
     /\ pages = [x \in Pages |-> ""]
@@ -41,6 +60,11 @@ Init ==
     /\ history = <<>>
     /\ depth = 0
 
+\* ============================================================================
+\* SYNCHRONIZATION ACTIONS
+\* ============================================================================
+
+\* PushSync: Local changes are synchronized to remote
 PushSync(page) ==
     /\ page \in DOMAIN pages
     /\ remote' = [remote EXCEPT ![page] = pages[page]]
@@ -49,6 +73,7 @@ PushSync(page) ==
     /\ UNCHANGED pages
     /\ depth' = depth + 1
 
+\* PullSync: Remote changes are pulled to local
 PullSync(page) ==
     /\ page \in DOMAIN remote
     /\ pages' = [pages EXCEPT ![page] = remote[page]]
@@ -57,15 +82,27 @@ PullSync(page) ==
     /\ UNCHANGED remote
     /\ depth' = depth + 1
 
-Next ==
+\* Local sync operations
+SyncNext ==
     /\ depth < 5
     /\ \E page \in Pages:
         PushSync(page) \/ PullSync(page)
 
-\* WikiSync's next-state relation includes sync operations plus WikiSimple's read/write operations
-\* When pages change, mark affected pages as unsynced
-CombinedNext == 
-    \/ Next 
+\* ============================================================================
+\* REFINEMENT OF WikiSimple
+\* ============================================================================
+
+\* WikiSync refines WikiSimple by tracking additional sync state.
+\* We compose WikiSimple's spec with our sync operations and update sync flags.
+\*
+\* When WikiSimple operations happen, update the sync tracking:
+\* - Read operations: no change to sync state
+\* - Write operations: mark page as unsynced
+\*
+\* Additionally, our own sync operations can happen.
+
+Next ==
+    \/ SyncNext
     \/ (\E user \in Users, page \in Pages, content \in Pages:
           WS!Write(user, page, content) /\ 
           synced' = [synced EXCEPT ![page] = FALSE] /\
@@ -73,31 +110,39 @@ CombinedNext ==
     \/ (\E user \in Users, page \in Pages:
           WS!Read(user, page) /\ UNCHANGED <<remote, synced>>)
 
-Spec == Init /\ [][CombinedNext]_<<pages, remote, synced, history, depth>>
+\* Full specification: initialize and then repeatedly apply Next
+Spec == Init /\ [][Next]_<<pages, remote, synced, history, depth>>
+
+\* Refinement claim: WikiSync refines WikiSimple
+\* This would require a refinement mapping, but is expressed implicitly:
+\* WikiSync!Spec restricted to WikiSimple variables should satisfy WS!Spec
+Refinement == WS!Spec /\ [][SyncNext]_<<remote, synced>>
 
 \* ============================================================================
 \* INVARIANTS AND THEOREMS FOR TLAPS
 \* ============================================================================
 
-\* Invariant: All invariants that should hold for every reachable state
+\* Combined invariant: All invariants that should hold for every reachable state
 Invariants == /\ TypeOK
               /\ PagesSyncConsistent
               /\ OperationConsistent
               /\ PagesComplete
 
-\* THEOREM InitInvariant: Init => Invariants
-\* <1>1. SUFFICES ASSUME NEW page \in Pages PROVE Init => Invariants
-\*       BY DEF Invariants
-\* <1> QED BY DEF Init, TypeOK, PagesSyncConsistent, OperationConsistent, PagesComplete
+\* THEOREM Spec => []TypeOK
+\*   PROOF OMITTED
 
-\* THEOREM PagesSyncInvariant: Spec => []PagesSyncConsistent
-\* <1> USE DEF Spec, Init, CombinedNext, Next, PushSync, PullSync, 
-\*           WS!Write, WS!Read, PagesSyncConsistent, Invariants, TypeOK
-\* <1> QED OMITTED
+\* THEOREM Spec => []PagesSyncConsistent
+\*   PROOF OMITTED
 
-\* THEOREM OperationConsistentInvariant: Spec => []OperationConsistent
-\* <1> USE DEF Spec, Init, CombinedNext, Next, PushSync, PullSync,
-\*           WS!Write, WS!Read, OperationConsistent, Invariants, TypeOK
-\* <1> QED OMITTED
+\* THEOREM Spec => []OperationConsistent
+\*   PROOF OMITTED
+
+\* THEOREM Spec => []PagesComplete
+\*   PROOF OMITTED
+
+\* THEOREM RefinementCorrectness: 
+\*   The set of states reachable by WikiSync on (pages, history, depth) 
+\*   is a subset of states reachable by WikiSimple
+\*   PROOF OMITTED
 
 ====

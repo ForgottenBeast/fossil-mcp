@@ -1,3 +1,10 @@
 target/
 *.fossil
 .direnv/
+
+# TLC model checker artifacts
+src/states/
+src/**/*_TTrace_*.tla
+src/**/*_TTrace_*.bin
+server/**/*_TTrace_*.tla
+server/**/*_TTrace_*.bin
