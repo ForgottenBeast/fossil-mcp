@@ -10,7 +10,9 @@ use crate::server::types::{ReadWikiPageArgs, WriteWikiPageArgs};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::process::Command;
-mod sync;
+
+pub mod sync;
+use sync::{sync_repository, SyncError};
 
 pub mod types;
 

@@ -6,9 +6,9 @@ This directory contains a TLA+ (Temporal Logic of Actions) specification for the
 
 ## Files
 
-- `fossil_mcp.tla`: Main TLA+ specification module
-- `fossil_mcp.cfg`: Model checking configuration
-- `TLA_SPECIFICATION.md`: This documentation
+- `src/server/WikiSync.tla`: Main TLA+ specification module (WikiSync refinement)
+- `src/server/WikiSync.cfg`: Model checking configuration
+- `TLA_SPECIFICATION.md`: This documentation (root level)
 
 ## What is TLA+?
 
@@ -162,6 +162,25 @@ Force write resolves conflicts locally:
     syncState' = "idle" ∧ remotePages' = pages
 ```
 
+## Module Hierarchy
+
+The TLA+ specification is co-located with its implementation code in the `src/server/` submodule:
+
+```
+src/server/
+├── sync.rs           # Rust implementation of synchronization logic
+├── types.rs          # Rust type definitions for API responses
+├── WikiSync.tla      # TLA+ formal specification of WikiSync behavior
+└── WikiSync.cfg      # Model checker configuration for WikiSync
+```
+
+This structure keeps the formal specification and its implementation together, enabling:
+- Easy verification that code matches specification
+- Coordinated updates when behavior changes
+- Clear mapping between formal model and runtime code
+
+The specification is referenced from `TLA_SPECIFICATION.md` (this file) at the repository root for visibility.
+
 ## How to Use with TLC Model Checker
 
 ### Prerequisites
@@ -172,13 +191,13 @@ Force write resolves conflicts locally:
 
 1. **Load the specification**:
    ```
-   Open fossil_mcp.tla in TLA+ Toolbox
+   Open src/server/WikiSync.tla in TLA+ Toolbox
    ```
 
 2. **Create a model** with the configuration:
    ```
-   Model name: fossil_mcp_small
-   Load fossil_mcp.cfg
+   Model name: wikisync_small
+   Load src/server/WikiSync.cfg
    ```
 
 3. **Set constants**:
@@ -299,5 +318,6 @@ PageNames is a constant set, limiting state space for model checking. Real syste
 
 For questions about this specification:
 - See repository documentation in CLAUDE.md and README
-- Reference the code implementation in src/server.rs
+- Reference the code implementation in src/server/sync.rs
+- Reference type definitions in src/server/types.rs
 - Review test cases in tests/fossil_wiki_integration.rs
