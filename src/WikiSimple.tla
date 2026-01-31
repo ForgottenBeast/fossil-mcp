@@ -102,6 +102,10 @@ Next ==
 
 Spec == Init /\ [][Next]_<<pages, remotePages, syncState, pendingSync, lastError>>
 
+\* Spec variant with weak fairness ensures progress
+SpecWithFairness == 
+    Spec /\ WF_<<pages, remotePages, syncState, pendingSync, lastError>>(Next)
+
 \* Invariant: no pending sync while syncing or conflicted
 NoPendingSyncWhileBusy ==
     syncState \in {"syncing", "conflict"} => pendingSync # {}
