@@ -59,14 +59,14 @@ SyncConflict ==
     /\ lastError' = "merge"
     /\ UNCHANGED <<pages, remotePages, pendingSync>>
 
-\* Resolve conflict by forcing local version to remote
+\* Resolve conflict by pulling remote version
 ResolveLocal ==
-    /\ syncState = "conflict"
-    /\ remotePages' = pages
-    /\ syncState' = "idle"
-    /\ pendingSync' = {}
-    /\ lastError' = "none"
-    /\ UNCHANGED <<pages>>
+     /\ syncState = "conflict"
+     /\ pages' = remotePages
+     /\ syncState' = "idle"
+     /\ pendingSync' = {}
+     /\ lastError' = "none"
+     /\ UNCHANGED <<remotePages>>
 
 \* External update to remote (simulating concurrent changes by another client)
 \* This can cause conflicts when sync is attempted
@@ -100,11 +100,7 @@ Next ==
     \/ RetrySyncAfterError
     \/ \E page \in Pages: RemoteUpdate(page, "remote")
 
-Spec == Init /\ [][Next]_<<pages, remotePages, syncState, pendingSync, lastError>>
-
-\* Spec variant with weak fairness ensures progress
-SpecWithFairness == 
-    Spec /\ WF_<<pages, remotePages, syncState, pendingSync, lastError>>(Next)
+Spec == Init /\ [][Next]_<<pages, remotePages, syncState, pendingSync, lastError>>/\ WF_<<pages, remotePages, syncState, pendingSync, lastError>>(Next)
 
 \* Invariant: no pending sync while syncing or conflicted
 NoPendingSyncWhileBusy ==
