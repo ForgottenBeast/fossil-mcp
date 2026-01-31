@@ -68,7 +68,8 @@ ResolveLocal ==
     /\ lastError' = "none"
     /\ UNCHANGED <<pages>>
 
-\* External update to remote (simulating another client)
+\* External update to remote (simulating concurrent changes by another client)
+\* This can cause conflicts when sync is attempted
 RemoteUpdate(page, content) ==
     /\ remotePages' = [remotePages EXCEPT ![page] = content]
     /\ UNCHANGED <<pages, syncState, pendingSync, lastError>>
@@ -118,5 +119,10 @@ ErrorStateCorrect ==
 \* Invariant: conflict state only with merge error
 ConflictStateCorrect ==
     syncState = "conflict" => lastError = "merge"
+
+\* Liveness: if we have pending syncs, eventually we reach idle
+\* (under weak fairness of all enabled actions)
+EventualIdleIfNoPending ==
+    pendingSync = {} ~> syncState = "idle"
 
 ====
