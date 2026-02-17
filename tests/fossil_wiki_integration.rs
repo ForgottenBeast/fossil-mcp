@@ -6,7 +6,16 @@ use tokio::process::Command;
 /// Helper to create a temporary Fossil repository for testing
 async fn create_test_repo() -> (PathBuf, tempfile::TempDir) {
     let temp_dir = tempfile::tempdir().expect("Failed to create temp directory");
-    let repo_path = temp_dir.path().join("test.fossil");
+
+    // Use a unique name for each test repo to avoid any collision issues
+    let unique_name = format!("test-{}.fossil", std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos());
+    let repo_path = temp_dir.path().join(unique_name);
+
+    // Delete the file if it somehow exists (shouldn't happen but be safe)
+    let _ = tokio::fs::remove_file(&repo_path).await;
 
     // Create a new Fossil repository
     let output = Command::new("fossil")
