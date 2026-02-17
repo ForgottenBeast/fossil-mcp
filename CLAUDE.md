@@ -134,13 +134,80 @@ Creates or updates a wiki page with optional repository synchronization.
 - `Other`: Other synchronization error (non-blocking)
 
 **Example Usage**:
+
 ```json
+// Simple write without sync
+{
+  "page_name": "LocalDraft",
+  "content": "# Draft Page\n\nWork in progress...",
+  "skip_sync": true
+}
+
+// Write with sync (default behavior)
 {
   "page_name": "API/v2/Reference",
-  "content": "# API Documentation\n\n...",
+  "content": "# API Documentation\n\nVersion 2.0 changes...",
   "mimetype": "text/x-markdown",
+  "skip_sync": false
+}
+
+// Force write despite potential conflicts
+{
+  "page_name": "HotFix",
+  "content": "# Emergency Update\n\nCritical fix applied.",
   "skip_sync": false,
-  "force_write": false
+  "force_write": true
+}
+```
+
+**Sync Workflow Examples**:
+
+```json
+// Success: Page written and synced
+{
+  "success": true,
+  "page_name": "UpdatedPage",
+  "message": "Wiki page written successfully",
+  "sync_status": {
+    "attempted": true,
+    "succeeded": true,
+    "error_type": null,
+    "error_message": null,
+    "can_force_write": false
+  }
+}
+
+// Non-blocking: No remote configured (page still written)
+{
+  "success": true,
+  "page_name": "LocalPage",
+  "message": "Wiki page written successfully",
+  "sync_status": {
+    "attempted": true,
+    "succeeded": false,
+    "error_type": "NoRemoteConfigured",
+    "error_message": "No remote URL configured for this repository.",
+    "can_force_write": false
+  }
+}
+
+// Blocking: Merge conflict without force_write
+{
+  "error": "Sync failed: Merge conflict occurred during synchronization. Use force_write flag to override."
+}
+
+// Override: With force_write=true, page writes despite conflict
+{
+  "success": true,
+  "page_name": "ConflictedPage",
+  "message": "Wiki page written successfully",
+  "sync_status": {
+    "attempted": true,
+    "succeeded": false,
+    "error_type": "MergeConflict",
+    "error_message": "Merge conflict occurred during synchronization. Use force_write to override.",
+    "can_force_write": true
+  }
 }
 ```
 

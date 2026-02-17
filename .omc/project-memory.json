@@ -70,8 +70,8 @@
   "hotPaths": [
     {
       "path": "src/server.rs",
-      "accessCount": 5,
-      "lastAccessed": 1771354178747,
+      "accessCount": 6,
+      "lastAccessed": 1771355014676,
       "type": "file"
     },
     {
@@ -118,8 +118,14 @@
     },
     {
       "path": "src/main.rs",
-      "accessCount": 1,
-      "lastAccessed": 1771346925367,
+      "accessCount": 2,
+      "lastAccessed": 1771354964149,
+      "type": "file"
+    },
+    {
+      "path": "CLAUDE.md",
+      "accessCount": 2,
+      "lastAccessed": 1771354997489,
       "type": "file"
     },
     {
