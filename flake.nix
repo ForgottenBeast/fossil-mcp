@@ -47,15 +47,17 @@
             };
           doc = platform.buildRustPackage {
             name = "package-doc";
-            dontCheck = true;
-            dontInstall = true;
-            nativeBuildInputs = with pkgs; [ cmake ];
+            doCheck = false;
+            nativeBuildInputs = with pkgs; [ cmake fossil ];
             cargoLock.lockFile = ./Cargo.lock;
             src = ./.;
             buildPhase = ''
+              cargo doc --offline --no-deps
+            '';
+            installPhase = ''
               mkdir -p $out
-              cargo doc --offline
-              cp -a target/doc $out/'';
+              cp -a target/doc $out/
+            '';
           };
 
           # Combined documentation: rustdoc + mdBook
