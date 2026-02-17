@@ -36,7 +36,8 @@
           default =
 
             platform.buildRustPackage {
-              pname = "package";
+              pname = "fossil-mcp";
+              doCheck = false;
               nativeBuildInputs = with pkgs; [ cmake ];
               buildInputs = with pkgs; [ stdenv.cc.cc.lib ];
               version = "0.1.0";
