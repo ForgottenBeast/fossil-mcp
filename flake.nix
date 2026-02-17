@@ -59,13 +59,15 @@
           };
 
           # Combined documentation: rustdoc + mdBook
-          docs = pkgs.stdenv.mkDerivation {
-            name = "fossil-mcp-docs";
+          docs = platform.buildRustPackage {
+            pname = "fossil-mcp-docs";
+            version = "0.1.0";
             src = ./.;
+
+            cargoLock.lockFile = ./Cargo.lock;
 
             nativeBuildInputs = with pkgs; [
               mdbook
-              toolchain
               cmake
             ];
 
@@ -73,20 +75,19 @@
               stdenv.cc.cc.lib
             ];
 
-            buildPhase = ''
-              export CARGO_HOME=$TMPDIR/cargo
-              mkdir -p $CARGO_HOME
+            # Don't run tests during doc build
+            doCheck = false;
 
+            buildPhase = ''
               echo "Building API documentation..."
               cargo doc --no-deps --offline
 
               echo "Building user guide..."
               mdbook build book
-
-              mkdir -p $out/share/doc/fossil-mcp
             '';
 
             installPhase = ''
+              mkdir -p $out/share/doc/fossil-mcp
               cp -r target/doc $out/share/doc/fossil-mcp/api
               cp -r book/output $out/share/doc/fossil-mcp/book
 
