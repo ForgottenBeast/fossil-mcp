@@ -1,0 +1,3 @@
+# errors
+
+Documentation coming soon.

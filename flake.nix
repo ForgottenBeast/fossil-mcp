@@ -57,6 +57,81 @@
               cargo doc --offline
               cp -a target/doc $out/'';
           };
+
+          # Combined documentation: rustdoc + mdBook
+          docs = pkgs.stdenv.mkDerivation {
+            name = "fossil-mcp-docs";
+            src = ./.;
+
+            nativeBuildInputs = with pkgs; [
+              mdbook
+              toolchain
+              cmake
+            ];
+
+            buildInputs = with pkgs; [
+              stdenv.cc.cc.lib
+            ];
+
+            buildPhase = ''
+              export CARGO_HOME=$TMPDIR/cargo
+              mkdir -p $CARGO_HOME
+
+              echo "Building API documentation..."
+              cargo doc --no-deps --offline
+
+              echo "Building user guide..."
+              mdbook build book
+
+              mkdir -p $out/share/doc/fossil-mcp
+            '';
+
+            installPhase = ''
+              cp -r target/doc $out/share/doc/fossil-mcp/api
+              cp -r book/output $out/share/doc/fossil-mcp/book
+
+              cat > $out/share/doc/fossil-mcp/index.html <<'EOF'
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Fossil MCP Documentation</title>
+  <style>
+    body { font-family: system-ui; max-width: 800px; margin: 50px auto; padding: 20px; }
+    .docs-section { border: 1px solid #ddd; border-radius: 8px; padding: 20px; margin: 20px 0; }
+    h1 { color: #333; }
+    a { color: #0066cc; text-decoration: none; }
+  </style>
+</head>
+<body>
+  <h1>📚 Fossil MCP Documentation</h1>
+  <div class="docs-section">
+    <h2>📖 User Guide</h2>
+    <p>Complete documentation for using the Fossil MCP server</p>
+    <a href="book/index.html">Open User Guide →</a>
+  </div>
+  <div class="docs-section">
+    <h2>🔧 API Reference</h2>
+    <p>Rust API documentation for developers</p>
+    <a href="api/fossil_mcp/index.html">Open API Docs →</a>
+  </div>
+</body>
+</html>
+EOF
+
+              mkdir -p $out/bin
+              cat > $out/bin/view-docs <<'SCRIPT'
+#!/usr/bin/env bash
+if command -v xdg-open &> /dev/null; then
+  xdg-open $out/share/doc/fossil-mcp/index.html
+elif command -v open &> /dev/null; then
+  open $out/share/doc/fossil-mcp/index.html
+else
+  echo "Documentation: $out/share/doc/fossil-mcp/index.html"
+fi
+SCRIPT
+              chmod +x $out/bin/view-docs
+            '';
+          };
         };
         devShells = {
           default = pkgs.mkShell {
@@ -71,6 +146,7 @@
               pkgs.jq
               pkgs.fossil
               pkgs.tlaplus18
+              pkgs.mdbook
             ];
 
             shellHook = ''

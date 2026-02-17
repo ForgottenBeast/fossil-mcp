@@ -6,3 +6,7 @@ target/
 **/states/
 **/*_TTrace_*.tla
 **/*_TTrace_*.bin
+
+# Documentation build outputs
+/book/book/
+/book/output/

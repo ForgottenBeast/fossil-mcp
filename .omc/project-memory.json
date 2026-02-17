@@ -1,0 +1,193 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1771346788583,
+  "projectRoot": "/home/agent/fossil-mcp",
+  "techStack": {
+    "languages": [
+      {
+        "name": "Rust",
+        "version": null,
+        "confidence": "high",
+        "markers": [
+          "Cargo.toml"
+        ]
+      }
+    ],
+    "frameworks": [],
+    "packageManager": "cargo",
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": "cargo build",
+    "testCommand": "cargo test",
+    "lintCommand": "cargo clippy",
+    "devCommand": "cargo run",
+    "scripts": {}
+  },
+  "conventions": {
+    "namingStyle": null,
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [
+      "src",
+      "tests"
+    ],
+    "gitBranches": {
+      "defaultBranch": "master",
+      "branchingStrategy": null
+    }
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "src": {
+      "path": "src",
+      "purpose": "Source code",
+      "fileCount": 6,
+      "lastAccessed": 1771346788549,
+      "keyFiles": [
+        "WikiSimple.cfg",
+        "WikiSimple.tla",
+        "WikiSimple_README.md",
+        "lib.rs",
+        "main.rs"
+      ]
+    },
+    "tests": {
+      "path": "tests",
+      "purpose": "Test files",
+      "fileCount": 1,
+      "lastAccessed": 1771346788550,
+      "keyFiles": [
+        "fossil_wiki_integration.rs"
+      ]
+    }
+  },
+  "hotPaths": [
+    {
+      "path": "src/server.rs",
+      "accessCount": 5,
+      "lastAccessed": 1771354178747,
+      "type": "file"
+    },
+    {
+      "path": "flake.nix",
+      "accessCount": 4,
+      "lastAccessed": 1771354436513,
+      "type": "file"
+    },
+    {
+      "path": "tests/fossil_wiki_integration.rs",
+      "accessCount": 3,
+      "lastAccessed": 1771347541817,
+      "type": "file"
+    },
+    {
+      "path": "src/lib.rs",
+      "accessCount": 3,
+      "lastAccessed": 1771354094521,
+      "type": "file"
+    },
+    {
+      "path": "book/book.toml",
+      "accessCount": 3,
+      "lastAccessed": 1771354454632,
+      "type": "file"
+    },
+    {
+      "path": "Cargo.toml",
+      "accessCount": 2,
+      "lastAccessed": 1771346921575,
+      "type": "file"
+    },
+    {
+      "path": "src/server/types.rs",
+      "accessCount": 2,
+      "lastAccessed": 1771354203489,
+      "type": "file"
+    },
+    {
+      "path": "src/server/sync.rs",
+      "accessCount": 2,
+      "lastAccessed": 1771354204500,
+      "type": "file"
+    },
+    {
+      "path": "src/main.rs",
+      "accessCount": 1,
+      "lastAccessed": 1771346925367,
+      "type": "file"
+    },
+    {
+      "path": "TLA_SPECIFICATION.md",
+      "accessCount": 1,
+      "lastAccessed": 1771346946252,
+      "type": "file"
+    },
+    {
+      "path": "TLC_VERIFICATION_REPORT.md",
+      "accessCount": 1,
+      "lastAccessed": 1771346946565,
+      "type": "file"
+    },
+    {
+      "path": "WIKISIMPLE_IMPROVEMENTS.md",
+      "accessCount": 1,
+      "lastAccessed": 1771346947081,
+      "type": "file"
+    },
+    {
+      "path": "AGENTS.md",
+      "accessCount": 1,
+      "lastAccessed": 1771346947154,
+      "type": "file"
+    },
+    {
+      "path": "book/src/SUMMARY.md",
+      "accessCount": 1,
+      "lastAccessed": 1771354224803,
+      "type": "file"
+    },
+    {
+      "path": "book/src/introduction.md",
+      "accessCount": 1,
+      "lastAccessed": 1771354239880,
+      "type": "file"
+    },
+    {
+      "path": "book/src/user-guide/getting-started.md",
+      "accessCount": 1,
+      "lastAccessed": 1771354255259,
+      "type": "file"
+    },
+    {
+      "path": "book/src/user-guide/quick-start.md",
+      "accessCount": 1,
+      "lastAccessed": 1771354270962,
+      "type": "file"
+    },
+    {
+      "path": "book/src/user-guide/installation.md",
+      "accessCount": 1,
+      "lastAccessed": 1771354286189,
+      "type": "file"
+    },
+    {
+      "path": "book/src/user-guide/mcp-integration.md",
+      "accessCount": 1,
+      "lastAccessed": 1771354299895,
+      "type": "file"
+    },
+    {
+      "path": "book/README.md",
+      "accessCount": 1,
+      "lastAccessed": 1771354512027,
+      "type": "file"
+    }
+  ],
+  "userDirectives": []
+}

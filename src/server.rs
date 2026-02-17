@@ -1,3 +1,29 @@
+//! MCP server implementation for Fossil SCM wiki operations.
+//!
+//! This module provides the core [`FossilWiki`] handler that implements
+//! the three MCP tools for wiki page manipulation. All operations execute
+//! `fossil` commands with the `-R` repository flag.
+//!
+//! ## Tool Overview
+//!
+//! - **list_wiki_pages**: Returns an array of all wiki page names
+//! - **read_wiki_page**: Retrieves the content of a specific page
+//! - **write_wiki_page**: Creates or updates a page with optional sync
+//!
+//! ## Example
+//!
+//! ```rust,no_run
+//! use fossil_mcp::server::FossilWiki;
+//! use std::path::PathBuf;
+//!
+//! # async fn example() {
+//! let wiki = FossilWiki::new(PathBuf::from("/path/to/repo.fossil"));
+//!
+//! // Use with MCP server infrastructure
+//! // The handler implements ServerHandler trait for rmcp
+//! # }
+//! ```
+
 use anyhow::Result;
 use rmcp::{
     Json,
@@ -16,7 +42,19 @@ use sync::{sync_repository, SyncError};
 
 pub mod types;
 
-
+/// Parses the output of `fossil wiki list` into a vector of page names.
+///
+/// Filters out empty lines and trims whitespace from each page name.
+///
+/// # Examples
+///
+/// ```
+/// use fossil_mcp::server::parse_wiki_list;
+///
+/// let output = "HomePage\n  About  \n\nDocs/API\n";
+/// let pages = parse_wiki_list(output);
+/// assert_eq!(pages, vec!["HomePage", "About", "Docs/API"]);
+/// ```
 pub fn parse_wiki_list(output: &str) -> Vec<String> {
     output
         .lines()
@@ -25,6 +63,34 @@ pub fn parse_wiki_list(output: &str) -> Vec<String> {
         .collect()
 }
 
+/// MCP handler for Fossil SCM wiki operations.
+///
+/// This struct provides three MCP tools for interacting with a Fossil repository's
+/// wiki pages. All operations use `fossil -R <repo>` to work without requiring a
+/// checkout directory.
+///
+/// # Thread Safety
+///
+/// `FossilWiki` is `Clone` and can be safely shared across async tasks. The
+/// repository path is wrapped in `Arc` for efficient cloning.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use fossil_mcp::FossilWiki;
+/// use std::path::PathBuf;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// // Create handler for a repository
+/// let wiki = FossilWiki::new(PathBuf::from("/path/to/repo.fossil"));
+///
+/// // The handler exposes three MCP tools:
+/// // - list_wiki_pages()
+/// // - read_wiki_page(args)
+/// // - write_wiki_page(args)
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Clone)]
 pub struct FossilWiki {
     repository: Arc<PathBuf>,
@@ -33,6 +99,20 @@ pub struct FossilWiki {
 
 #[tool_router]
 impl FossilWiki {
+    /// Creates a new `FossilWiki` handler for the specified repository.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path to the Fossil repository file (e.g., `/path/to/repo.fossil`)
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use fossil_mcp::FossilWiki;
+    /// use std::path::PathBuf;
+    ///
+    /// let wiki = FossilWiki::new(PathBuf::from("/tmp/test.fossil"));
+    /// ```
     pub fn new(path: PathBuf) -> Self {
         Self {
             repository: Arc::new(path),
@@ -44,7 +124,40 @@ impl FossilWiki {
         &self.repository
     }
 
-    /// List all wiki pages in the Fossil repository
+    /// Lists all wiki pages in the Fossil repository.
+    ///
+    /// Executes `fossil wiki -R <repo> list` and returns the page names.
+    ///
+    /// # MCP Tool
+    ///
+    /// This is exposed as the `list_wiki_pages` MCP tool.
+    ///
+    /// **Arguments**: None
+    ///
+    /// **Returns**: `{"pages": ["HomePage", "About", "Docs/API"]}`
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The `fossil` command fails to execute
+    /// - The repository file doesn't exist or is invalid
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use fossil_mcp::FossilWiki;
+    /// use std::path::PathBuf;
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let wiki = FossilWiki::new(PathBuf::from("/path/to/repo.fossil"));
+    /// let response = wiki.list_wiki_pages().await?;
+    ///
+    /// for page in &response.0.pages {
+    ///     println!("Page: {}", page);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
     #[tool(description = "List all wiki pages in the Fossil repository")]
     pub async fn list_wiki_pages(&self) -> Result<Json<types::ListWikiPagesResponse>, String> {
         let output = Command::new("fossil")
@@ -64,7 +177,55 @@ impl FossilWiki {
         Ok(Json(types::ListWikiPagesResponse { pages }))
     }
 
-    /// Read the content of a wiki page
+    /// Reads the content of a specific wiki page.
+    ///
+    /// Executes `fossil wiki -R <repo> export <page_name>` to retrieve the page content.
+    ///
+    /// # MCP Tool
+    ///
+    /// This is exposed as the `read_wiki_page` MCP tool.
+    ///
+    /// **Arguments**:
+    /// ```json
+    /// {
+    ///   "page_name": "HomePage"
+    /// }
+    /// ```
+    ///
+    /// **Returns**:
+    /// ```json
+    /// {
+    ///   "page_name": "HomePage",
+    ///   "content": "# Welcome\n\nWelcome to the wiki!"
+    /// }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The page doesn't exist
+    /// - The `fossil` command fails
+    /// - The repository is invalid
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use fossil_mcp::{FossilWiki, ReadWikiPageArgs};
+    /// use rmcp::handler::server::wrapper::Parameters;
+    /// use std::path::PathBuf;
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let wiki = FossilWiki::new(PathBuf::from("/path/to/repo.fossil"));
+    ///
+    /// let args = Parameters(ReadWikiPageArgs {
+    ///     page_name: "HomePage".to_string(),
+    /// });
+    ///
+    /// let response = wiki.read_wiki_page(args).await?;
+    /// println!("Content: {}", response.0.content);
+    /// # Ok(())
+    /// # }
+    /// ```
     #[tool(description = "Read the content of a wiki page")]
     pub async fn read_wiki_page(
         &self,
