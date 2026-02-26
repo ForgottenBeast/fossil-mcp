@@ -38,13 +38,18 @@
             platform.buildRustPackage {
               pname = "fossil-mcp";
               doCheck = false;
-              nativeBuildInputs = with pkgs; [ cmake ];
-              buildInputs = with pkgs; [ stdenv.cc.cc.lib ];
+              nativeBuildInputs = with pkgs; [ cmake pkg-config ];
+              buildInputs = with pkgs; [ stdenv.cc.cc.lib openssl ];
               version = "0.1.0";
 
               src = ./.;
 
               cargoLock.lockFile = ./Cargo.lock;
+
+              # For cross-compilation to musl
+              OPENSSL_DIR = "${pkgs.openssl.dev}";
+              OPENSSL_LIB_DIR = "${pkgs.openssl.out}/lib";
+              OPENSSL_INCLUDE_DIR = "${pkgs.openssl.dev}/include";
             };
           doc = platform.buildRustPackage {
             name = "package-doc";
@@ -72,14 +77,21 @@
             nativeBuildInputs = with pkgs; [
               mdbook
               cmake
+              pkg-config
             ];
 
             buildInputs = with pkgs; [
               stdenv.cc.cc.lib
+              openssl
             ];
 
             # Don't run tests during doc build
             doCheck = false;
+
+            # For cross-compilation to musl
+            OPENSSL_DIR = "${pkgs.openssl.dev}";
+            OPENSSL_LIB_DIR = "${pkgs.openssl.out}/lib";
+            OPENSSL_INCLUDE_DIR = "${pkgs.openssl.dev}/include";
 
             buildPhase = ''
               echo "Building API documentation..."
