@@ -39,7 +39,7 @@
               pname = "fossil-mcp";
               doCheck = false;
               nativeBuildInputs = with pkgs; [ cmake pkg-config ];
-              buildInputs = with pkgs; [ stdenv.cc.cc.lib openssl ];
+              buildInputs = with pkgs; [ stdenv.cc.cc.lib openssl openssl.dev ];
               version = "0.1.0";
 
               src = ./.;
