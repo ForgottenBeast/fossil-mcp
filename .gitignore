@@ -1,6 +1,8 @@
 target/
 *.fossil
 .direnv/
+result
+.omc
 
 # TLC model checker artifacts
 **/states/
