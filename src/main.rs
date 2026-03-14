@@ -64,21 +64,23 @@ use fossil_mcp::FossilWiki;
 
 /// Command-line arguments for the Fossil MCP server.
 ///
-/// The server requires a path to a Fossil repository file and communicates
-/// via stdio using the Model Context Protocol.
+/// The server can be started with or without a repository path. If not provided,
+/// use the configure_repository tool to set it at runtime.
 ///
 /// # Example
 ///
 /// ```bash
 /// fossil-mcp --repository /path/to/repo.fossil
 /// fossil-mcp -R /path/to/repo.fossil  # Short form
+/// FOSSIL_REPO=/path/to/repo.fossil fossil-mcp  # Environment variable
+/// fossil-mcp  # Start without repository (configure later via MCP tool)
 /// ```
 #[derive(Parser, Debug)]
 #[command(author, version, about = "MCP server for Fossil SCM wiki operations", long_about = None)]
 struct Args {
-    /// Path to the Fossil repository file (e.g., /path/to/project.fossil)
+    /// Path to the Fossil repository file (optional - can also use FOSSIL_REPO env var or configure at runtime)
     #[arg(short = 'R', long = "repository", value_name = "FILE")]
-    repository: PathBuf,
+    repository: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -92,13 +94,25 @@ async fn main() -> Result<()> {
     // Parse command-line arguments
     let args = Args::parse();
 
-    // Validate that the repository file exists
-    if !args.repository.exists() {
-        anyhow::bail!("Repository file does not exist: {:?}", args.repository);
+    // Determine repository path: CLI arg > environment variable > None
+    let repo_path = args.repository
+        .or_else(|| std::env::var("FOSSIL_REPO").ok().map(PathBuf::from));
+
+    // Validate repository if provided
+    if let Some(ref path) = repo_path {
+        if !path.exists() {
+            anyhow::bail!("Repository file does not exist: {:?}", path);
+        }
+        tracing::info!("Repository configured: {:?}", path);
+        tracing::info!("Wiki operations (list/read/write) are available");
+    } else {
+        tracing::info!("Starting without repository configuration");
+        tracing::info!("Wiki operations will fail until repository is configured");
+        tracing::info!("Configure using: configure_repository tool, -R flag, or FOSSIL_REPO env var");
     }
 
     // Create the wiki handler
-    let wiki = FossilWiki::new(args.repository);
+    let wiki = FossilWiki::new(repo_path);
 
     // Create transport from stdin/stdout
     let transport = (stdin(), stdout());

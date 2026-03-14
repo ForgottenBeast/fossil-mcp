@@ -119,5 +119,7 @@ pub mod server;
 // Re-export commonly used types for convenience
 pub use server::FossilWiki;
 pub use server::types::{
-    ReadWikiPageArgs, ReadWikiPageResponse, WriteWikiPageArgs, WriteWikiPageResponse,
+    AuthenticateWikiArgs, AuthenticateWikiResponse, ConfigureRepositoryArgs,
+    ConfigureRepositoryResponse, ReadWikiPageArgs, ReadWikiPageResponse, SearchWikiArgs,
+    SearchWikiResponse, WriteWikiPageArgs, WriteWikiPageResponse,
 };

@@ -5,6 +5,172 @@ fn is_false(value: &bool) -> bool {
     !value
 }
 
+/// Arguments for configuring the repository path at runtime.
+///
+/// # Example
+/// ```json
+/// {
+///   "repo_path": "/path/to/repo.fossil"
+/// }
+/// ```
+#[derive(Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct ConfigureRepositoryArgs {
+    /// Path to the Fossil repository file
+    pub repo_path: String,
+}
+
+/// Response from configuring the repository.
+///
+/// # Example
+/// ```json
+/// {
+///   "success": true,
+///   "message": "Repository configured: \"/path/to/repo.fossil\""
+/// }
+/// ```
+#[derive(Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct ConfigureRepositoryResponse {
+    /// Whether the configuration was successful
+    pub success: bool,
+    /// Human-readable message describing the result
+    pub message: String,
+}
+
+/// Arguments for authenticating with wiki_searcher API.
+///
+/// # Example
+/// ```json
+/// {
+///   "username": "myuser",
+///   "password": "mypass"
+/// }
+/// ```
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct AuthenticateWikiArgs {
+    /// Fossil username
+    pub username: String,
+    /// User password
+    pub password: String,
+}
+
+/// Response from wiki authentication.
+///
+/// # Example
+/// ```json
+/// {
+///   "success": true,
+///   "session_token": "abc123...",
+///   "message": "Authentication successful"
+/// }
+/// ```
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct AuthenticateWikiResponse {
+    /// Whether authentication was successful
+    pub success: bool,
+    /// Session token for subsequent API calls (if successful)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_token: Option<String>,
+    /// Human-readable message
+    pub message: String,
+}
+
+/// Arguments for searching wiki pages via semantic search API.
+///
+/// Provide either api_key or session_token for authentication.
+///
+/// # Example with API key
+/// ```json
+/// {
+///   "query": "embedding concepts",
+///   "limit": 10,
+///   "threshold": 0.7,
+///   "api_key": "your-api-key-here"
+/// }
+/// ```
+///
+/// # Example with session token
+/// ```json
+/// {
+///   "query": "embedding concepts",
+///   "limit": 10,
+///   "threshold": 0.7,
+///   "session_token": "token-from-authenticate"
+/// }
+/// ```
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct SearchWikiArgs {
+    /// Search query text
+    pub query: String,
+    /// Maximum number of results to return (default: 10)
+    #[serde(default = "default_limit")]
+    pub limit: usize,
+    /// Minimum relevance score threshold 0.0-1.0 (default: 0.7)
+    #[serde(default = "default_threshold")]
+    pub threshold: f32,
+    /// API key for wiki_searcher authentication (mutually exclusive with session_token)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+    /// Session token from authenticate_wiki (mutually exclusive with api_key)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_token: Option<String>,
+}
+
+fn default_limit() -> usize {
+    10
+}
+
+fn default_threshold() -> f32 {
+    0.7
+}
+
+/// Individual search result from wiki search.
+///
+/// # Example
+/// ```json
+/// {
+///   "page_name": "Machine Learning",
+///   "chunk_text": "Embeddings are dense vector representations...",
+///   "section_header": "Introduction",
+///   "relevance_score": 0.843,
+///   "chunk_index": 0
+/// }
+/// ```
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct SearchResult {
+    /// Name of the wiki page
+    pub page_name: String,
+    /// Text content of the matching chunk
+    pub chunk_text: String,
+    /// Section header within the page (if applicable)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub section_header: Option<String>,
+    /// Relevance score (0.0-1.0, higher is more relevant)
+    pub relevance_score: f32,
+    /// Index of the chunk within the page
+    pub chunk_index: usize,
+}
+
+/// Response from wiki search operation.
+///
+/// # Example
+/// ```json
+/// {
+///   "results": [
+///     {
+///       "page_name": "Machine Learning",
+///       "chunk_text": "Embeddings are...",
+///       "relevance_score": 0.843,
+///       "chunk_index": 0
+///     }
+///   ]
+/// }
+/// ```
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct SearchWikiResponse {
+    /// List of search results ordered by relevance
+    pub results: Vec<SearchResult>,
+}
+
 /// Arguments for reading a wiki page from a Fossil repository.
 ///
 /// # Example
