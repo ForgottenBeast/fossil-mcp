@@ -621,7 +621,7 @@ impl FossilWiki {
         if success {
             tracing::info!("User '{}' authenticated successfully", args.0.username);
         } else {
-            tracing::warning!("Authentication failed for user '{}'", args.0.username);
+            tracing::warn!("Authentication failed for user '{}'", args.0.username);
         }
 
         Ok(Json(types::AuthenticateWikiResponse {
