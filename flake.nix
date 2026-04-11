@@ -39,17 +39,12 @@
               pname = "fossil-mcp";
               doCheck = false;
               nativeBuildInputs = with pkgs; [ cmake pkg-config ];
-              buildInputs = with pkgs; [ stdenv.cc.cc.lib openssl openssl.dev ];
+              buildInputs = with pkgs; [ stdenv.cc.cc.lib ];
               version = "0.1.0";
 
               src = ./.;
 
               cargoLock.lockFile = ./Cargo.lock;
-
-              # For cross-compilation to musl
-              OPENSSL_DIR = "${pkgs.openssl.dev}";
-              OPENSSL_LIB_DIR = "${pkgs.openssl.out}/lib";
-              OPENSSL_INCLUDE_DIR = "${pkgs.openssl.dev}/include";
             };
           doc = platform.buildRustPackage {
             name = "package-doc";
@@ -82,16 +77,10 @@
 
             buildInputs = with pkgs; [
               stdenv.cc.cc.lib
-              openssl
             ];
 
             # Don't run tests during doc build
             doCheck = false;
-
-            # For cross-compilation to musl
-            OPENSSL_DIR = "${pkgs.openssl.dev}";
-            OPENSSL_LIB_DIR = "${pkgs.openssl.out}/lib";
-            OPENSSL_INCLUDE_DIR = "${pkgs.openssl.dev}/include";
 
             buildPhase = ''
               echo "Building API documentation..."
@@ -163,8 +152,6 @@ SCRIPT
               pkgs.fossil
               pkgs.tlaplus18
               pkgs.mdbook
-              pkgs.openssl
-              pkgs.openssl.dev
               pkgs.pkg-config
               pkgs.cmake
             ];
@@ -173,9 +160,6 @@ SCRIPT
               export CARGO_HOME="$PWD/.cargo"
               export PATH="$CARGO_HOME/bin:$PATH"
               export LD_LIBRARY_PATH="${pkgs.stdenv.cc.cc.lib}/lib";
-              export OPENSSL_DIR="${pkgs.openssl.dev}";
-              export OPENSSL_LIB_DIR="${pkgs.openssl.out}/lib";
-              export OPENSSL_INCLUDE_DIR="${pkgs.openssl.dev}/include";
               mkdir -p .cargo
               echo '*' > .cargo/.gitignore
             '';
