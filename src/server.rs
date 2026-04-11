@@ -29,7 +29,7 @@ use rmcp::{
     Json,
     handler::server::{ServerHandler, tool::ToolRouter, wrapper::Parameters},
     model::{ServerCapabilities, ServerInfo},
-    tool, tool_handler, tool_router,
+    tool, tool_router,
 };
 
 use crate::server::types::{
@@ -208,7 +208,7 @@ impl FossilWiki {
     /// # Ok(())
     /// # }
     /// ```
-    #[tool(description = "Configure repository path at runtime")]
+    #[tool(description = "Connect to a local Fossil repository by specifying its file path")]
     pub async fn configure_repository(
         &self,
         args: Parameters<ConfigureRepositoryArgs>,
@@ -786,7 +786,6 @@ impl FossilWiki {
     }
 }
 
-#[tool_handler]
 impl ServerHandler for FossilWiki {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
@@ -795,6 +794,41 @@ impl ServerHandler for FossilWiki {
             server_info: Default::default(),
             instructions: Some("MCP server for accessing Fossil SCM wiki pages".to_string()),
         }
+    }
+
+    async fn list_tools(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::ListToolsResult, rmcp::ErrorData> {
+        let has_repo = self.repository.read().unwrap().is_some();
+        let tools = if has_repo {
+            self.tool_router.list_all()
+        } else {
+            self.tool_router
+                .list_all()
+                .into_iter()
+                .filter(|t| t.name == "configure_repository")
+                .collect()
+        };
+        Ok(rmcp::model::ListToolsResult {
+            tools,
+            meta: None,
+            next_cursor: None,
+        })
+    }
+
+    async fn call_tool(
+        &self,
+        request: rmcp::model::CallToolRequestParams,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+        let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+        self.tool_router.call(tcc).await
+    }
+
+    fn get_tool(&self, name: &str) -> Option<rmcp::model::Tool> {
+        self.tool_router.get(name).cloned()
     }
 }
 
@@ -852,10 +886,15 @@ mod tests {
     }
 
     #[test]
-    fn test_fossil_wiki_creation() {
-        let path = std::path::PathBuf::from("/tmp/test.fossil");
-        let wiki = FossilWiki::new(path.clone());
-        assert_eq!(wiki.repository_path(), &path);
+    fn test_fossil_wiki_creation_with_repo() {
+        let wiki = FossilWiki::new(Some(std::path::PathBuf::from("/tmp/test.fossil")));
+        assert!(wiki.get_repository().is_ok());
+    }
+
+    #[test]
+    fn test_fossil_wiki_creation_without_repo() {
+        let wiki = FossilWiki::new(None);
+        assert!(wiki.get_repository().is_err());
     }
 
     #[test]

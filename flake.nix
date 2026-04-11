@@ -163,12 +163,19 @@ SCRIPT
               pkgs.fossil
               pkgs.tlaplus18
               pkgs.mdbook
+              pkgs.openssl
+              pkgs.openssl.dev
+              pkgs.pkg-config
+              pkgs.cmake
             ];
 
             shellHook = ''
               export CARGO_HOME="$PWD/.cargo"
               export PATH="$CARGO_HOME/bin:$PATH"
               export LD_LIBRARY_PATH="${pkgs.stdenv.cc.cc.lib}/lib";
+              export OPENSSL_DIR="${pkgs.openssl.dev}";
+              export OPENSSL_LIB_DIR="${pkgs.openssl.out}/lib";
+              export OPENSSL_INCLUDE_DIR="${pkgs.openssl.dev}/include";
               mkdir -p .cargo
               echo '*' > .cargo/.gitignore
             '';
