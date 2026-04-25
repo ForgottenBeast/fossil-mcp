@@ -38,8 +38,8 @@
             platform.buildRustPackage {
               pname = "fossil-mcp";
               doCheck = false;
-              nativeBuildInputs = with pkgs; [ cmake pkg-config ];
-              buildInputs = with pkgs; [ stdenv.cc.cc.lib ];
+              nativeBuildInputs = with pkgs; [ cmake pkg-config autoPatchelfHook ];
+              buildInputs = with pkgs; [ stdenv.cc.cc.lib openssl ];
               version = "0.1.0";
 
               src = ./.;
