@@ -107,6 +107,63 @@ pub fn percent_encode_into(out: &mut String, s: &str) {
     }
 }
 
+/// Whether `s` is an RFC 3339 `date-time`: `YYYY-MM-DDThh:mm:ss[.f+](Z|±hh:mm)`
+/// with a real calendar date, hour 0-23, minute 0-59 and second 0-60 (a leap
+/// second). `T` and `Z` may be lower case, as the RFC allows. ASCII only; no
+/// surrounding whitespace.
+pub fn is_rfc3339(s: &str) -> bool {
+    fn num(b: &[u8]) -> Option<u32> {
+        b.iter()
+            .all(u8::is_ascii_digit)
+            .then(|| b.iter().fold(0u32, |n, d| n * 10 + u32::from(d - b'0')))
+    }
+    let b = s.as_bytes();
+    if b.len() < 20 || b[4] != b'-' || b[7] != b'-' || !matches!(b[10], b'T' | b't') {
+        return false;
+    }
+    if b[13] != b':' || b[16] != b':' {
+        return false;
+    }
+    let (Some(year), Some(month), Some(day)) = (num(&b[0..4]), num(&b[5..7]), num(&b[8..10]))
+    else {
+        return false;
+    };
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let days = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return false,
+    };
+    if !(1..=days).contains(&day) {
+        return false;
+    }
+    let (Some(hour), Some(minute), Some(second)) =
+        (num(&b[11..13]), num(&b[14..16]), num(&b[17..19]))
+    else {
+        return false;
+    };
+    if hour > 23 || minute > 59 || second > 60 {
+        return false;
+    }
+    let mut rest = &b[19..];
+    if rest.first() == Some(&b'.') {
+        let digits = rest[1..].iter().take_while(|c| c.is_ascii_digit()).count();
+        if digits == 0 {
+            return false;
+        }
+        rest = &rest[1 + digits..];
+    }
+    match rest {
+        [b'Z' | b'z'] => true,
+        [b'+' | b'-', h1, h2, b':', m1, m2] => {
+            matches!((num(&[*h1, *h2]), num(&[*m1, *m2])), (Some(h), Some(m)) if h <= 23 && m <= 59)
+        }
+        _ => false,
+    }
+}
+
 /// Why a [`BacklinksService`] could not be built.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InitError {
@@ -291,8 +348,8 @@ fn parse_page(body: &[u8]) -> Result<SidecarPage, Failure> {
     let w: Wire = serde_json::from_slice(body).map_err(|_| bad())?;
     if w.schema_version != SCHEMA_VERSION
         || w.status != "current"
-        || w.checked_at.is_empty()
         || w.checked_at.len() > 64
+        || !is_rfc3339(&w.checked_at)
         || w.page.is_empty()
         || w.page.len() > MAX_PAGE_NAME_BYTES
         || w.repo_id.len() > 64
