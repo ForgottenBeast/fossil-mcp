@@ -731,3 +731,78 @@ fn startup_credential_error_text_is_fixed_and_pathless() {
     assert!(t.contains("key file"), "{t}");
     assert!(!t.contains('/'), "{t}");
 }
+
+// ---- checked_at is RFC 3339 -------------------------------------------------------
+
+#[test]
+fn rfc3339_accepts_valid_timestamps() {
+    use fossil_mcp::server::backlinks::is_rfc3339;
+    for ok in [
+        "2026-11-23T10:00:00Z",
+        "2026-11-23T10:00:00z",
+        "2026-11-23t10:00:00Z",
+        "2026-11-23T10:00:00.123456789Z",
+        "2026-11-23T10:00:00+01:00",
+        "2026-11-23T10:00:00-23:59",
+        "2026-11-23T23:59:60Z",
+        "2024-02-29T00:00:00Z",
+        "2000-02-29T00:00:00Z",
+        "0001-01-01T00:00:00Z",
+    ] {
+        assert!(is_rfc3339(ok), "{ok}");
+    }
+}
+
+#[test]
+fn rfc3339_rejects_everything_else() {
+    use fossil_mcp::server::backlinks::is_rfc3339;
+    for bad in [
+        "",
+        "not-a-timestamp",
+        "2026-11-23",
+        "2026-11-23T10:00:00",
+        "2026-11-23 10:00:00Z",
+        "2026-11-23T10:00Z",
+        "2026-13-01T00:00:00Z",
+        "2026-00-10T00:00:00Z",
+        "2026-11-00T00:00:00Z",
+        "2026-11-31T00:00:00Z",
+        "2026-02-29T00:00:00Z",
+        "1900-02-29T00:00:00Z",
+        "2026-11-23T24:00:00Z",
+        "2026-11-23T10:60:00Z",
+        "2026-11-23T10:00:61Z",
+        "2026-11-23T10:00:00.Z",
+        "2026-11-23T10:00:00+0100",
+        "2026-11-23T10:00:00+24:00",
+        "2026-11-23T10:00:00+01:60",
+        "2026-11-23T10:00:00Zjunk",
+        "2026-11-23T10:00:00Z ",
+        " 2026-11-23T10:00:00Z",
+        "２026-11-23T10:00:00Z",
+        "2026-11-23T10:00:00+٠١:٠٠",
+        "+026-11-23T10:00:00Z",
+        "2026-1-23T10:00:00Z",
+    ] {
+        assert!(!is_rfc3339(bad), "{bad:?}");
+    }
+}
+
+#[tokio::test]
+async fn sidecar_answer_with_an_invalid_checked_at_is_bad_response() {
+    for bad in ["not-a-timestamp", "2026-13-40T99:99:99Z", "2026-11-23"] {
+        let e = env(
+            move |_, _| {
+                let mut b = page_body(json!([]));
+                b["checked_at"] = json!(bad);
+                Reply::json(200, b)
+            },
+            3600,
+        );
+        let w = wiki(&e, 5000).await;
+        assert_code(
+            call(&w, args("Target", None, None)).await,
+            ErrorCode::BadResponse,
+        );
+    }
+}
