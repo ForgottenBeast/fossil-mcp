@@ -36,34 +36,51 @@ The server requires a path to a Fossil repository file:
 
 ```bash
 # Using short flag
-./target/release/fossil-mcp -R /path/to/repo.fossil
+./target/release/fossil-mcp --repo-id notes -R /path/to/repo.fossil
 
 # Using long flag
-./target/release/fossil-mcp --repository /path/to/repo.fossil
+./target/release/fossil-mcp --repo-id notes --repository /path/to/repo.fossil
 ```
 
 ## Architecture
 
 ### Core Design
-- **Transport**: Stdio-based MCP server (runs as a subprocess, communicates via stdin/stdout)
-- **State Management**: Uses `AppState` with `Arc<PathBuf>` to share the repository path across async handlers
-- **Command Execution**: All operations execute `fossil -R <repo_path>` commands, allowing interaction with any Fossil repository without requiring a checkout directory
+- **Transport**: stdio MCP server, one process per bound repository.
+- **Binding**: `--repo-id <alias> -R <repo.fossil>` are mandatory and fixed at startup
+  (`src/server/binding.rs`). No runtime reconfiguration, no `FOSSIL_REPO` fallback,
+  symlink/empty/non-repository files are rejected before the MCP service starts.
+- **Authority**: owner-local OS authority only. `repo_id` is an identifier, not a credential.
+  Writes need `--allow-local-writes --state-dir <0700 dir>`; `publication: sync_repository`
+  also needs `--allow-repository-sync` (sync may publish every sharable artifact).
+- **Processes**: every `fossil` child goes through `src/server/process.rs` (stdin piping,
+  capped concurrent stdout/stderr drains, one deadline, kill-on-drop). Page bytes travel over
+  stdin; there is no temporary content file.
+- **Receipts**: `write_wiki_page` returns `receipt{commit_state, publication_state, revision,
+  previous_revision, error_code, retry_action}` (`types.rs`, mapping in `outcome.rs`).
+  `unknown` is never reported as failure. Errors carry fixed codes only, no child output,
+  paths or content.
+- **Journal**: `operations.rs` keeps one private record per `operation_id` (reserve before
+  spawn, atomic replace). Same key + same request replays the receipt; unknown survives restart;
+  `wiki_reconcile_operation(retry_publication=true)` re-runs only sync, never commit.
+- **Not implemented**: lost-update protection / remote authority (separate gate). The receipt's
+  `previous_revision`/`revision` are where it plugs in. Semantic search was removed.
 
-### Key Components
+### Tools (stable catalog of five)
+`list_wiki_pages`, `read_wiki_page` (returns `revision`), `write_wiki_page`,
+`wiki_operation_status`, `wiki_reconcile_operation`. Read-only servers answer write/status/
+reconcile with `write_disabled`; the catalog does not change at runtime.
 
-**Handler Functions** (src/main.rs:41-120):
-- `list_wiki_pages`: Executes `fossil -R <repo> wiki list`
-- `read_wiki_page`: Executes `fossil -R <repo> wiki export <page_name>`
-- `write_wiki_page`: Writes content to temp file, then executes `fossil -R <repo> wiki commit`
-
-**State Pattern**:
-The server uses clap for CLI parsing and passes `AppState` to all handlers via `.with_handler_and_state()`. This allows the repository path to be specified at launch and used consistently across all operations.
+### Testing
+`cargo test --locked --all-targets && cargo test --locked --doc`. Integration tests use the
+real `fossil` binary on throwaway repositories (isolated HOME) and a scripted fake fossil for
+fault injection; they never touch a real wiki. `nix build .#checks.<system>.slice1` runs the
+same suite. The TLA+ models are retired (see `TLA_SPECIFICATION.md`).
 
 ## MCP Integration
 
 ### Adding to Claude Code
 ```bash
-claude mcp add --transport stdio fossil-mcp "/path/to/fossil-mcp -R /path/to/repo.fossil"
+claude mcp add --transport stdio fossil-mcp "/path/to/fossil-mcp --repo-id notes -R /path/to/repo.fossil"
 ```
 
 ### Adding to Claude Desktop
@@ -74,7 +91,7 @@ Configuration file location: `~/Library/Application Support/Claude/claude_deskto
   "mcpServers": {
     "fossil": {
       "command": "/path/to/fossil_mcp/target/release/fossil-mcp",
-      "args": ["-R", "/path/to/your/repo.fossil"]
+      "args": ["--repo-id", "notes", "-R", "/path/to/your/repo.fossil"]
     }
   }
 }
