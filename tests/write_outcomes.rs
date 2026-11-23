@@ -294,3 +294,82 @@ async fn identical_sibling_makes_the_revision_unresolved() {
     assert_eq!(rc.error_code, Some(ErrorCode::RevisionUnresolved));
     assert_eq!(rc.commit_state, CommitState::Committed);
 }
+
+/// Another writer commits `B` (same bytes as ours) after our pre-flight read
+/// but before our commit; our commit `C` has `B` as its parent.
+const PRE_COMMIT_WRITER: &str = r#"if [ ! -f "$D/raced" ]; then
+  touch "$D/raced"
+  brid=$(( $(cat "$D/rid" 2>/dev/null || echo 0) + 1 )); echo $brid > "$D/rid"
+  prevb=$(cat "$D/uuid" 2>/dev/null)
+  echo "$brid|B|$prevb|$ph" >> "$D/revs"
+  printf 'D t\nL P\nU fx\nW 2\nv2\nZ 00\n' > "$D/artifact_B"
+  echo B > "$D/uuid"
+fi"#;
+
+#[tokio::test]
+async fn writer_between_preflight_and_commit_with_same_bytes_is_not_attributed() {
+    let f = FakeFossil::new();
+    // Existing head A, observed by our pre-flight.
+    let w = bound(&f, |_| {}).await;
+    let a = parse(
+        &w.write_wiki_page(wargs("seed", "P", "v1", Publication::LocalOnly))
+            .await
+            .unwrap(),
+    )
+    .receipt
+    .unwrap()
+    .revision
+    .unwrap();
+    f.on("sql", PRE_COMMIT_WRITER);
+    let r = w
+        .write_wiki_page(wargs("op2", "P", "v2", Publication::LocalOnly))
+        .await
+        .unwrap();
+    let rc = parse(&r).receipt.unwrap();
+    assert_eq!(rc.previous_revision.as_deref(), Some(a.as_str()));
+    assert_eq!(rc.commit_state, CommitState::Committed);
+    let ours = std::fs::read_to_string(f.file("uuid")).unwrap();
+    assert_ne!(
+        rc.revision.as_deref(),
+        Some("B"),
+        "writer B mislabelled as ours"
+    );
+    assert_eq!(
+        rc.revision.as_deref(),
+        Some(ours.trim()),
+        "our commit C is the only revision created after the baseline"
+    );
+}
+
+/// The exact re-review counterexample: preflight head A; another writer
+/// commits B (parent A) with the bytes we are about to write while our commit
+/// runs; our commit C has parent B. B must never be returned.
+const DURING_COMMIT_WRITER: &str = r#"brid=$(( $(cat "$D/rid" 2>/dev/null || echo 0) + 1 )); echo $brid > "$D/rid"
+prevb=$(cat "$D/uuid" 2>/dev/null)
+echo "$brid|B|$prevb|$ph" >> "$D/revs"
+printf 'D t\nL P\nU fx\nW 2\nv2\nZ 00\n' > "$D/artifact_B"
+echo B > "$D/uuid""#;
+
+#[tokio::test]
+async fn same_bytes_writer_during_commit_is_never_returned_as_ours() {
+    let f = FakeFossil::new();
+    let w = bound(&f, |_| {}).await;
+    let _ = w
+        .write_wiki_page(wargs("seed", "P", "v1", Publication::LocalOnly))
+        .await
+        .unwrap();
+    f.on("commit", DURING_COMMIT_WRITER);
+    let r = w
+        .write_wiki_page(wargs("op2", "P", "v2", Publication::LocalOnly))
+        .await
+        .unwrap();
+    let rc = parse(&r).receipt.unwrap();
+    assert_eq!(rc.commit_state, CommitState::Committed);
+    assert_ne!(
+        rc.revision.as_deref(),
+        Some("B"),
+        "writer B mislabelled as ours"
+    );
+    assert_eq!(rc.revision, None, "two indistinguishable matches");
+    assert_eq!(rc.error_code, Some(ErrorCode::RevisionUnresolved));
+}

@@ -40,10 +40,12 @@ All notable changes to this project are documented here. The project follows
 - Publication reconcile combines the retry with the prior receipt: an inconclusive retry
   (no remote, zero round trips, spawn failure) keeps `unknown`; only a confirmed sync
   resolves it. Remote presence of the artifact is not checked.
-- The committed revision is attributed by content, not parent equality: candidates are
-  the page's artifacts whose parent is the pre-write head, and the single one whose wiki
-  body equals the written bytes wins. A concurrent sibling is never returned; zero or
-  several matches give `revision_unresolved`.
+- The committed revision is attributed by content among every revision of the page
+  created after a blob-id baseline read just before the commit (neither `fossil wiki
+  create` nor `commit` prints the new artifact id on 2.27 or 2.28): the single one whose
+  wiki body equals the written bytes wins. A concurrent writer, whatever its parent, is
+  never returned; zero or several matches (including a same-bytes writer racing our
+  commit) give `revision_unresolved`. No baseline means no commit (`preflight_failed`).
 - Every `fossil` child runs in its own process group and the whole group is killed on
   deadline, output overflow and cancellation, so forked descendants no longer outlive them.
 

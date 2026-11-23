@@ -51,26 +51,27 @@ use types::{
     ReadWikiPageArgs, ReconcileOperationArgs, WriteReceipt, WriteWikiPageArgs,
 };
 
-/// Every wiki revision, newest first: `hex(tagname)|rid|uuid|parent uuid`.
+/// The highest blob id, read right before our commit starts.
 ///
-/// The only SQL this server runs. It is a constant: no request-derived text
-/// is ever interpolated; the page is matched in Rust against the hex-decoded
-/// tag name.
-const SQL_WIKI_REVISIONS: &str = "SELECT hex(t.tagname), x.rid, b.uuid, COALESCE(pb.uuid, '') \
+/// `fossil wiki create|commit` prints no artifact id on 2.27 or 2.28 (only
+/// "Created/Updated wiki page"), so identity is inferred: everything our
+/// commit creates has a larger `rid` than anything that existed before it.
+const SQL_MAX_RID: &str = "SELECT COALESCE(MAX(rid), 0) FROM blob";
+
+/// Every wiki revision, newest first: `hex(tagname), rid, uuid`.
+///
+/// Constant: no request-derived text is ever interpolated; the page is
+/// matched in Rust against the hex-decoded tag name.
+const SQL_WIKI_REVISIONS: &str = "SELECT hex(t.tagname), x.rid, b.uuid \
 FROM tagxref x JOIN tag t ON t.tagid=x.tagid JOIN blob b ON b.rid=x.rid \
-LEFT JOIN plink p ON p.cid=x.rid LEFT JOIN blob pb ON pb.rid=p.pid \
 WHERE substr(t.tagname, 1, 5)='wiki-' AND x.tagtype>0 ORDER BY x.rid DESC LIMIT 4097";
 
-/// `fossil sql` prints rows in quote mode (`'a',2,'b'`) or list mode (`a|2|b`)
-/// depending on its stdin; both are accepted because no selected value can
-/// contain `,`, `|` or `'` (hex text, integers, artifact ids).
-///
 /// Row cap of [`SQL_WIKI_REVISIONS`] (the query asks for one more).
 const MAX_REVISION_ROWS: usize = 4096;
 
 /// The complete set of SQL strings this server hands to `fossil sql`.
 #[doc(hidden)]
-pub const ATTRIBUTION_SQL: &[&str] = &[SQL_WIKI_REVISIONS];
+pub const ATTRIBUTION_SQL: &[&str] = &[SQL_MAX_RID, SQL_WIKI_REVISIONS];
 
 /// Maximum concurrently running `fossil` children.
 const MAX_ACTIVE_CHILDREN: usize = 4;
@@ -398,15 +399,36 @@ impl FossilWiki {
         }
     }
 
+    /// The highest blob id right now (see [`SQL_MAX_RID`]).
+    async fn max_rid(&self) -> Option<u64> {
+        let out = self
+            .run(
+                &["sql", "--readonly", "-R", &self.repo_arg(), SQL_MAX_RID],
+                None,
+                self.inner.limits,
+            )
+            .await
+            .ok()
+            .filter(ProcOutput::success)?;
+        String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .trim_matches('\'')
+            .parse()
+            .ok()
+    }
+
     /// Identify the artifact this write created.
     ///
-    /// Parent equality is not enough (a concurrent import can add a sibling
-    /// with the same parent and become the visible head), so candidates are
-    /// the page's artifacts whose parent is the head observed before the
-    /// write, and the one accepted is the single candidate whose wiki body
-    /// equals the bytes we wrote. Zero or several matches, or any failure,
-    /// give `None` (`revision_unresolved`).
-    async fn attribute(&self, prev: Option<&str>, page: &str, content: &[u8]) -> Option<String> {
+    /// `baseline` is the highest blob id read just before our commit ran, so
+    /// the page revisions with a larger `rid` are exactly those created
+    /// meanwhile, by us or by a concurrent writer, whatever their parent.
+    /// The one accepted is the single such revision whose wiki body equals
+    /// the bytes we wrote. Zero or several matches (a concurrent writer
+    /// with the same bytes is indistinguishable), a listing that does not
+    /// reach back to the baseline, or any failure give `None`
+    /// (`revision_unresolved`). Ids are monotonic unless the repository is
+    /// purged or restored mid-write, which no content check can detect.
+    async fn attribute(&self, baseline: u64, page: &str, content: &[u8]) -> Option<String> {
         let repo = self.repo_arg();
         let mut limits = self.inner.limits;
         limits.stdout_max = limits.stdout_max.saturating_mul(4);
@@ -421,33 +443,37 @@ impl FossilWiki {
             .filter(ProcOutput::success)?;
         let want_tag = format!("wiki-{page}");
         let stdout = String::from_utf8_lossy(&listed.stdout);
-        if stdout.lines().count() > MAX_REVISION_ROWS {
-            return None;
-        }
-        let candidates: Vec<String> = stdout
+        let rows: Vec<(&str, u64, &str)> = stdout
             .lines()
-            .filter_map(|l| {
+            .map(|l| {
                 let mut f = l.split([',', '|']).map(|v| v.trim().trim_matches('\''));
-                let (tag, _rid, uuid, parent) = (f.next()?, f.next()?, f.next()?, f.next()?);
-                (unhex(tag)? == want_tag.as_bytes()
-                    && is_artifact_id(uuid)
-                    && Some(parent).filter(|p| !p.is_empty()) == prev)
-                    .then(|| uuid.to_string())
+                Some((f.next()?, f.next()?.parse().ok()?, f.next()?))
             })
+            .collect::<Option<_>>()?;
+        if rows.len() > MAX_REVISION_ROWS && rows.last().is_none_or(|r| r.1 > baseline) {
+            return None; // the cap hid part of the window after the baseline
+        }
+        let candidates: Vec<&str> = rows
+            .iter()
+            .take(MAX_REVISION_ROWS)
+            .filter(|(tag, rid, uuid)| {
+                *rid > baseline
+                    && is_artifact_id(uuid)
+                    && unhex(tag).is_some_and(|t| t == want_tag.as_bytes())
+            })
+            .map(|r| r.2)
             .collect();
         let mut matched = None;
         for uuid in candidates {
-            let Ok(art) = self
-                .run(&["artifact", &uuid, "-R", &repo], None, limits)
+            let art = self
+                .run(&["artifact", uuid, "-R", &repo], None, limits)
                 .await
-            else {
-                return None;
-            };
+                .ok()?;
             if art.success() && wiki_body(&art.stdout) == Some(content) {
                 if matched.is_some() {
                     return None;
                 }
-                matched = Some(uuid);
+                matched = Some(uuid.to_string());
             }
         }
         matched
@@ -517,6 +543,11 @@ impl FossilWiki {
         };
         base.previous_revision = prev.clone();
 
+        // No baseline, no commit: attribution could never be proven afterwards.
+        let Some(baseline) = self.max_rid().await else {
+            let never = CommitOutcome::NeverRan(ErrorCode::PreflightFailed);
+            return finish(self, &mut rec, &base, never, None);
+        };
         let repo = self.repo_arg();
         let mimetype = req.mimetype.map(|m| format!("--mimetype={}", m.as_str()));
         let mut argv = vec!["wiki", sub, req.page_name.as_str(), "-R", repo.as_str()];
@@ -532,7 +563,7 @@ impl FossilWiki {
             Ok(o) if !o.success() => CommitOutcome::Unproven(ErrorCode::CommitUnconfirmed),
             Ok(_) => {
                 let revision = self
-                    .attribute(prev.as_deref(), &req.page_name, req.content.as_bytes())
+                    .attribute(baseline, &req.page_name, req.content.as_bytes())
                     .await;
                 CommitOutcome::Committed { revision }
             }

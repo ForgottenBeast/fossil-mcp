@@ -66,10 +66,16 @@ case "$sub" in
     if [ -f "$D/project_code" ]; then echo "project-code: $(cat "$D/project_code")"; else echo "project-code: PC1"; fi
     ;;
   sql)
-    # Emulates the module's fixed wiki-revision query: 'hex(tagname)',rid,'uuid','parent' (quote mode)
-    if [ -f "$D/revs" ]; then
-      sort -t'|' -k1 -nr "$D/revs" | while IFS='|' read -r r u p h; do echo "'$h',$r,'$u','$p'"; done
-    fi
+    # Emulates the module's two fixed queries (quote mode).
+    case "$*" in
+      *"MAX(rid)"*) cat "$D/rid" 2>/dev/null || echo 0 ;;
+      *)
+        # 'hex(tagname)',rid,'uuid' newest first
+        if [ -f "$D/revs" ]; then
+          sort -t'|' -k1 -nr "$D/revs" | while IFS='|' read -r r u p h; do echo "'$h',$r,'$u'"; done
+        fi
+        ;;
+    esac
     ;;
   artifact)
     [ -f "$D/missing_artifact" ] && exit 1
