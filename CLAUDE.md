@@ -105,128 +105,71 @@ No parameters. Returns all wiki page names in the repository.
 **Response**: `{pages: string[]}`
 
 ### read_wiki_page
-Reads the content of a wiki page.
+Reads the exact content and current revision of a page.
 
 **Parameters**:
 - `page_name` (string, required): Name of the page to read
 
-**Response**: `{page_name: string, content: string}`
+**Response**: `{page_name, content, revision}`. `revision` is the Fossil artifact id of the version read.
 
 ### write_wiki_page
-Creates or updates a wiki page with optional repository synchronization.
+Creates or updates a page and returns a typed receipt. Requires the server to be started with
+`--allow-local-writes --state-dir <private dir>`; `publication: "sync_repository"` also needs
+`--allow-repository-sync`.
 
-**Parameters**:
-- `page_name` (string, required): Name of the page to write
-- `content` (string, required): Content for the page
-- `mimetype` (string, optional): MIME type for the page (e.g., `"text/x-fossil-wiki"`, `"text/x-markdown"`, `"text/plain"`)
-- `skip_sync` (boolean, optional, default: `false`): If `true`, skip repository synchronization after writing
-- `force_write` (boolean, optional, default: `false`): If `true`, allow write to succeed even if sync fails with a merge conflict
+**Parameters** (unknown fields are rejected):
+- `operation_id` (string, required): caller-generated idempotency key, 1-64 ASCII letters, digits, `_` or `-`
+- `page_name` (string, required): non-empty, at most 256 bytes, no NUL/CR/LF, not starting with `-`
+- `content` (string, required): at most 1 MiB, sent over stdin (no temporary file)
+- `mimetype` (string, optional): `"text/x-fossil-wiki"`, `"text/x-markdown"` or `"text/plain"`
+- `publication` (string, optional, default `"local_only"`): `"local_only"` or `"sync_repository"`.
+  A sync may publish **all** sharable repository artifacts, not just this page.
 
-**Sync Behavior**:
-- When `skip_sync` is `false`, the repository will synchronize with remote after the page is written
-- Merge conflicts are blocking errors that prevent the operation unless `force_write` is `true`
-- Network errors and missing remote configuration are non-blocking and don't prevent the page write
-- The response includes a `sync_status` field describing the synchronization outcome
-
-**Response**:
-```json
-{
-  "success": bool,
-  "page_name": string,
-  "message": string,
-  "sync_status": {
-    "attempted": bool,
-    "succeeded": bool,
-    "error_type": string | null,
-    "error_message": string | null,
-    "can_force_write": bool
-  } | null
-}
-```
-
-**Sync Error Types**:
-- `MergeConflict`: Merge conflict occurred (blocking, can retry with `force_write: true`)
-- `NoRemoteConfigured`: No remote repository is configured (non-blocking)
-- `NetworkError`: Network connectivity issue (non-blocking)
-- `Other`: Other synchronization error (non-blocking)
-
-**Example Usage**:
+**Response**: `{receipt, error_code, message}`. The receipt:
 
 ```json
-// Simple write without sync
 {
-  "page_name": "LocalDraft",
-  "content": "# Draft Page\n\nWork in progress...",
-  "skip_sync": true
-}
-
-// Write with sync (default behavior)
-{
+  "receipt_version": 1,
+  "repo_id": "notes",
+  "operation_id": "op-1",
   "page_name": "API/v2/Reference",
-  "content": "# API Documentation\n\nVersion 2.0 changes...",
-  "mimetype": "text/x-markdown",
-  "skip_sync": false
-}
-
-// Force write despite potential conflicts
-{
-  "page_name": "HotFix",
-  "content": "# Emergency Update\n\nCritical fix applied.",
-  "skip_sync": false,
-  "force_write": true
+  "previous_revision": "<artifact id or null>",
+  "revision": "<artifact id, null unless attributed>",
+  "commit_state": "committed",
+  "publication_state": "confirmed",
+  "error_code": null,
+  "retry_action": "none"
 }
 ```
 
-**Sync Workflow Examples**:
+- `commit_state`: `not_committed` (provably nothing happened), `committed`, `unknown`
+- `publication_state`: `not_requested`, `pending` (provably not yet performed), `confirmed`, `unknown`
+- `retry_action`: `none`, `retry_same_operation`, `reconcile`, `operator_required`
+- `error_code` is a fixed snake_case code (for example `timeout`, `commit_unconfirmed`,
+  `publication_unconfirmed`, `no_remote`, `revision_unresolved`, `idempotency_conflict`,
+  `journal_repository_mismatch`); messages never contain child output, paths or content.
 
-```json
-// Success: Page written and synced
-{
-  "success": true,
-  "page_name": "UpdatedPage",
-  "message": "Wiki page written successfully",
-  "sync_status": {
-    "attempted": true,
-    "succeeded": true,
-    "error_type": null,
-    "error_message": null,
-    "can_force_write": false
-  }
-}
+**Semantics**:
+- Repeating an `operation_id` with the same request replays the stored receipt and never commits
+  twice; the same id with a different request is `idempotency_conflict`.
+- `unknown` is never reported as failure and is never downgraded by an inconclusive retry.
+- `revision` is attributed by content (the single artifact parented on the pre-write head whose body
+  equals the bytes written); otherwise the commit is `committed` with `revision_unresolved`.
+- Receipts are bound to the repository (project code and path); a journal used with another
+  repository fails closed with `journal_repository_mismatch`.
+- There is no lost-update protection: `previous_revision` is observed, not enforced.
 
-// Non-blocking: No remote configured (page still written)
-{
-  "success": true,
-  "page_name": "LocalPage",
-  "message": "Wiki page written successfully",
-  "sync_status": {
-    "attempted": true,
-    "succeeded": false,
-    "error_type": "NoRemoteConfigured",
-    "error_message": "No remote URL configured for this repository.",
-    "can_force_write": false
-  }
-}
+### wiki_operation_status
+`{operation_id}` -> the stored receipt, read-only. `unknown_operation` if there is none.
 
-// Blocking: Merge conflict without force_write
-{
-  "error": "Sync failed: Merge conflict occurred during synchronization. Use force_write flag to override."
-}
+### wiki_reconcile_operation
+`{operation_id, retry_publication?}` -> the stored receipt. With `retry_publication: true` it re-runs
+only `fossil sync` for an already committed revision whose publication is `pending` or `unknown`
+(needs `--allow-repository-sync`); it never creates a wiki artifact, and first verifies the recorded
+artifact exists in the bound repository.
 
-// Override: With force_write=true, page writes despite conflict
-{
-  "success": true,
-  "page_name": "ConflictedPage",
-  "message": "Wiki page written successfully",
-  "sync_status": {
-    "attempted": true,
-    "succeeded": false,
-    "error_type": "MergeConflict",
-    "error_message": "Merge conflict occurred during synchronization. Use force_write to override.",
-    "can_force_write": true
-  }
-}
-```
+**Annotations**: reads and status are `readOnlyHint`; write and reconcile are not read-only, not
+destructive (Fossil history is append-only), idempotent and open-world (they may sync).
 
 ## Nix Flake Configuration
 

@@ -23,6 +23,8 @@ All notable changes to this project are documented here. The project follows
 - `wiki_operation_status`, `wiki_reconcile_operation`, private receipt journal.
 - Bounded subprocess runner; tests with throwaway repositories, fake-fossil fault
   injection, property tests, black-box stdio tests; `doCheck = true` and `checks.slice1`.
+- MCP tool annotations: reads and status are read-only; write and reconcile are
+  non-destructive, idempotent and open-world.
 
 ### Fixed
 - Page content no longer passes through a predictable shared `/tmp` file.
@@ -49,6 +51,7 @@ All notable changes to this project are documented here. The project follows
 - Child output, paths and content never reach tool errors.
 
 ### Documentation
+- `CLAUDE.md` documents the receipt API instead of `skip_sync` / `force_write`.
 - TLA+ reports are retired; `TLA_SPECIFICATION.md` carries the invariant-to-test table.
 
 ### Known gaps
