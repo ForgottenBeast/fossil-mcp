@@ -20,3 +20,11 @@ fn ureq_does_not_enable_the_json_feature() {
     assert!(ureq.contains("rustls"), "{ureq}");
     assert!(!ureq.contains("json"), "unused ureq json feature: {ureq}");
 }
+
+#[test]
+fn test_key_fixture_is_labelled_test_only() {
+    let readme = include_str!("fixtures/README.md");
+    assert!(readme.contains("test-rsa-private.pem"));
+    assert!(readme.to_lowercase().contains("throwaway"));
+    assert!(readme.to_lowercase().contains("never be reused"));
+}
