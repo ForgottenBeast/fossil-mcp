@@ -36,7 +36,7 @@ async fn create_test_repo() -> (PathBuf, tempfile::TempDir) {
 #[tokio::test]
 async fn test_list_empty_wiki() {
     let (repo_path, _temp_dir) = create_test_repo().await;
-    let wiki = FossilWiki::new(repo_path);
+    let wiki = FossilWiki::new(Some(repo_path));
 
     let result = wiki
         .list_wiki_pages()
@@ -50,7 +50,7 @@ async fn test_list_empty_wiki() {
 #[tokio::test]
 async fn test_write_and_read_wiki_page() {
     let (repo_path, _temp_dir) = create_test_repo().await;
-    let wiki = FossilWiki::new(repo_path);
+    let wiki = FossilWiki::new(Some(repo_path));
 
     // Write a wiki page
     let write_args = Parameters(WriteWikiPageArgs {
@@ -86,7 +86,7 @@ async fn test_write_and_read_wiki_page() {
 #[tokio::test]
 async fn test_write_multiple_pages() {
     let (repo_path, _temp_dir) = create_test_repo().await;
-    let wiki = FossilWiki::new(repo_path);
+    let wiki = FossilWiki::new(Some(repo_path));
 
     // Write multiple pages
     for i in 1..=3 {
@@ -120,7 +120,7 @@ async fn test_write_multiple_pages() {
 #[tokio::test]
 async fn test_write_wiki_page_markdown() {
     let (repo_path, _temp_dir) = create_test_repo().await;
-    let wiki = FossilWiki::new(repo_path);
+    let wiki = FossilWiki::new(Some(repo_path));
 
     let markdown_content = "# Test Page\n\nThis is **bold** and this is *italic*.";
 
@@ -155,7 +155,7 @@ async fn test_write_wiki_page_markdown() {
 #[tokio::test]
 async fn test_update_existing_page() {
     let (repo_path, _temp_dir) = create_test_repo().await;
-    let wiki = FossilWiki::new(repo_path);
+    let wiki = FossilWiki::new(Some(repo_path));
 
     // Write initial version
     let write_args = Parameters(WriteWikiPageArgs {
@@ -199,7 +199,7 @@ async fn test_update_existing_page() {
 #[tokio::test]
 async fn test_wiki_page_with_special_characters() {
     let (repo_path, _temp_dir) = create_test_repo().await;
-    let wiki = FossilWiki::new(repo_path);
+    let wiki = FossilWiki::new(Some(repo_path));
 
     let special_content = "Special chars: @#$%^&*()_+-=[]{}|;:,.<>?";
 
@@ -230,7 +230,7 @@ async fn test_wiki_page_with_special_characters() {
 #[tokio::test]
 async fn test_read_nonexistent_page() {
     let (repo_path, _temp_dir) = create_test_repo().await;
-    let wiki = FossilWiki::new(repo_path);
+    let wiki = FossilWiki::new(Some(repo_path));
 
     let read_args = Parameters(ReadWikiPageArgs {
         page_name: "NonexistentPage".to_string(),
@@ -243,7 +243,7 @@ async fn test_read_nonexistent_page() {
 #[tokio::test]
 async fn test_write_wiki_page_skip_sync() {
     let (repo_path, _temp_dir) = create_test_repo().await;
-    let wiki = FossilWiki::new(repo_path);
+    let wiki = FossilWiki::new(Some(repo_path));
 
     let write_args = Parameters(WriteWikiPageArgs {
         page_name: "SkipSyncTest".to_string(),
@@ -266,7 +266,7 @@ async fn test_write_wiki_page_skip_sync() {
 #[tokio::test]
 async fn test_write_wiki_page_with_sync_no_remote() {
     let (repo_path, _temp_dir) = create_test_repo().await;
-    let wiki = FossilWiki::new(repo_path);
+    let wiki = FossilWiki::new(Some(repo_path));
 
     let write_args = Parameters(WriteWikiPageArgs {
         page_name: "SyncNoRemoteTest".to_string(),
@@ -292,7 +292,7 @@ async fn test_write_wiki_page_with_sync_no_remote() {
 #[tokio::test]
 async fn test_write_wiki_page_force_write_false() {
     let (repo_path, _temp_dir) = create_test_repo().await;
-    let wiki = FossilWiki::new(repo_path);
+    let wiki = FossilWiki::new(Some(repo_path));
 
     let write_args = Parameters(WriteWikiPageArgs {
         page_name: "ForceWriteFalseTest".to_string(),
@@ -315,7 +315,7 @@ async fn test_write_wiki_page_force_write_false() {
 #[tokio::test]
 async fn test_write_wiki_page_force_write_true() {
     let (repo_path, _temp_dir) = create_test_repo().await;
-    let wiki = FossilWiki::new(repo_path);
+    let wiki = FossilWiki::new(Some(repo_path));
 
     let write_args = Parameters(WriteWikiPageArgs {
         page_name: "ForceWriteTrueTest".to_string(),
@@ -336,7 +336,7 @@ async fn test_write_wiki_page_force_write_true() {
 #[tokio::test]
 async fn test_sync_status_blocking_error() {
     let (repo_path, _temp_dir) = create_test_repo().await;
-    let wiki = FossilWiki::new(repo_path);
+    let wiki = FossilWiki::new(Some(repo_path));
 
     // This test verifies that when a sync status has a blocking error (can_force_write=true),
     // the page is still written but with proper error status

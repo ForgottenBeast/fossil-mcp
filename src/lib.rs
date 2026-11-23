@@ -20,7 +20,7 @@
 //! #[tokio::main]
 //! async fn main() {
 //!     // Create a handler for your Fossil repository
-//!     let wiki = FossilWiki::new(PathBuf::from("/path/to/repo.fossil"));
+//!     let wiki = FossilWiki::new(Some(PathBuf::from("/path/to/repo.fossil")));
 //!
 //!     // Use the handler with MCP server infrastructure
 //!     // (typically called by the MCP server binary)
@@ -56,7 +56,7 @@
 //! use std::path::PathBuf;
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! let wiki = FossilWiki::new(PathBuf::from("/path/to/repo.fossil"));
+//! let wiki = FossilWiki::new(Some(PathBuf::from("/path/to/repo.fossil")));
 //!
 //! let args = Parameters(WriteWikiPageArgs {
 //!     page_name: "HomePage".to_string(),

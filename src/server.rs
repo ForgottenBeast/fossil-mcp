@@ -17,7 +17,7 @@
 //! use std::path::PathBuf;
 //!
 //! # async fn example() {
-//! let wiki = FossilWiki::new(PathBuf::from("/path/to/repo.fossil"));
+//! let wiki = FossilWiki::new(Some(PathBuf::from("/path/to/repo.fossil")));
 //!
 //! // Use with MCP server infrastructure
 //! // The handler implements ServerHandler trait for rmcp
@@ -262,7 +262,7 @@ impl FossilWiki {
     /// use std::path::PathBuf;
     ///
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// let wiki = FossilWiki::new(PathBuf::from("/path/to/repo.fossil"));
+    /// let wiki = FossilWiki::new(Some(PathBuf::from("/path/to/repo.fossil")));
     /// let response = wiki.list_wiki_pages().await?;
     ///
     /// for page in &response.0.pages {
@@ -330,7 +330,7 @@ impl FossilWiki {
     /// use std::path::PathBuf;
     ///
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// let wiki = FossilWiki::new(PathBuf::from("/path/to/repo.fossil"));
+    /// let wiki = FossilWiki::new(Some(PathBuf::from("/path/to/repo.fossil")));
     ///
     /// let args = Parameters(ReadWikiPageArgs {
     ///     page_name: "HomePage".to_string(),
@@ -402,7 +402,7 @@ impl FossilWiki {
     /// # use std::path::PathBuf;
     /// # #[tokio::main]
     /// # async fn main() {
-    /// let wiki = FossilWiki::new(PathBuf::from("/path/to/repo.fossil"));
+    /// let wiki = FossilWiki::new(Some(PathBuf::from("/path/to/repo.fossil")));
     /// let args = Parameters(WriteWikiPageArgs {
     ///     page_name: "HomePage".to_string(),
     ///     content: "Welcome to the wiki".to_string(),
@@ -703,7 +703,8 @@ impl FossilWiki {
     ///     query: "embedding concepts".to_string(),
     ///     limit: 10,
     ///     threshold: 0.7,
-    ///     api_key: "secret-key".to_string(),
+    ///     api_key: Some("secret-key".to_string()),
+    ///     session_token: None,
     /// });
     ///
     /// let response = wiki.search_wiki(args).await?;
