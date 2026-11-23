@@ -248,3 +248,48 @@ async fn write_disabled_and_publication_denied_spawn_nothing() {
         "denied before reserving"
     );
 }
+
+/// A concurrent writer adds a sibling with the same parent and makes it the
+/// visible head. Parent equality alone cannot tell it from our artifact.
+const SIBLING: &str = r#"echo sib > "$D/head_override"
+printf 'D t\nL P\nU fx\nW %s\n%s\nZ 00\n' "${SIB_LEN:-4}" "${SIB_BODY:-sibx}" > "$D/artifact_sib"
+printf "'sib'\n'u$id'\n" > "$D/sql_out""#;
+
+#[tokio::test]
+async fn sibling_with_same_parent_is_never_returned_as_our_revision() {
+    let f = FakeFossil::new();
+    f.on("create", SIBLING);
+    let w = bound(&f, |_| {}).await;
+    let r = w
+        .write_wiki_page(wargs("op1", "P", "v1", Publication::LocalOnly))
+        .await
+        .unwrap();
+    let rc = parse(&r).receipt.unwrap();
+    assert_ne!(
+        rc.revision.as_deref(),
+        Some("sib"),
+        "sibling mislabelled as ours"
+    );
+    let ours = std::fs::read_to_string(f.file("uuid")).unwrap();
+    assert_eq!(
+        rc.revision.as_deref(),
+        Some(ours.trim()),
+        "the artifact whose bytes we wrote is identified"
+    );
+}
+
+#[tokio::test]
+async fn identical_sibling_makes_the_revision_unresolved() {
+    let f = FakeFossil::new();
+    f.on("create", &format!("SIB_LEN=2; SIB_BODY=v1\n{SIBLING}"));
+    let w = bound(&f, |_| {}).await;
+    let r = w
+        .write_wiki_page(wargs("op1", "P", "v1", Publication::LocalOnly))
+        .await
+        .unwrap();
+    assert!(is_error(&r));
+    let rc = parse(&r).receipt.unwrap();
+    assert_eq!(rc.revision, None);
+    assert_eq!(rc.error_code, Some(ErrorCode::RevisionUnresolved));
+    assert_eq!(rc.commit_state, CommitState::Committed);
+}

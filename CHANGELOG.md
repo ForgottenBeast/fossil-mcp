@@ -38,6 +38,10 @@ All notable changes to this project are documented here. The project follows
 - Publication reconcile combines the retry with the prior receipt: an inconclusive retry
   (no remote, zero round trips, spawn failure) keeps `unknown`; only a confirmed sync
   resolves it. Remote presence of the artifact is not checked.
+- The committed revision is attributed by content, not parent equality: candidates are
+  the page's artifacts whose parent is the pre-write head, and the single one whose wiki
+  body equals the written bytes wins. A concurrent sibling is never returned; zero or
+  several matches give `revision_unresolved`.
 
 ### Security
 - Child output, paths and content never reach tool errors.

@@ -54,6 +54,15 @@ use types::{
 /// Maximum concurrently running `fossil` children.
 const MAX_ACTIVE_CHILDREN: usize = 4;
 
+/// The `W` card payload of a wiki artifact: `W <size>\n<bytes>\n`.
+fn wiki_body(artifact: &[u8]) -> Option<&[u8]> {
+    let at = artifact.windows(3).position(|w| w == b"\nW ")? + 3;
+    let rest = &artifact[at..];
+    let nl = rest.iter().position(|b| *b == b'\n')?;
+    let size: usize = std::str::from_utf8(&rest[..nl]).ok()?.parse().ok()?;
+    rest.get(nl + 1..nl + 1 + size)
+}
+
 /// Parses the output of `fossil wiki list` into a vector of page names.
 ///
 /// Filters out empty lines and trims whitespace from each page name.
@@ -111,11 +120,7 @@ pub struct WriteToolOutput {
 
 enum Head {
     Absent,
-    Present {
-        uuid: String,
-        parent: Option<String>,
-        content: String,
-    },
+    Present { uuid: String, content: String },
 }
 
 #[derive(Deserialize)]
@@ -128,7 +133,6 @@ struct JsonWiki {
 #[derive(Deserialize)]
 struct JsonPayload {
     uuid: String,
-    parent: Option<String>,
     content: Option<String>,
 }
 
@@ -352,11 +356,71 @@ impl FossilWiki {
             (Some("FOSSIL-3006"), _) => Ok(Head::Absent),
             (None, Some(p)) => Ok(Head::Present {
                 uuid: p.uuid,
-                parent: p.parent.filter(|s| !s.is_empty()),
                 content: p.content.unwrap_or_default(),
             }),
             _ => Err(ErrorCode::BadResponse),
         }
+    }
+
+    /// Identify the artifact this write created.
+    ///
+    /// Parent equality is not enough (a concurrent import can add a sibling
+    /// with the same parent and become the visible head), so candidates are
+    /// the page's artifacts whose parent is the head observed before the
+    /// write, and the one accepted is the single candidate whose wiki body
+    /// equals the bytes we wrote. Zero or several matches, or any failure,
+    /// give `None` (`revision_unresolved`).
+    async fn attribute(&self, prev: Option<&str>, page: &str, content: &[u8]) -> Option<String> {
+        const MAX_CANDIDATES: usize = 16;
+        let alnum = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric());
+        let parent = match prev {
+            Some(p) if alnum(p) => format!(
+                "EXISTS(SELECT 1 FROM plink WHERE cid=x.rid AND pid=(SELECT rid FROM blob WHERE uuid='{p}'))"
+            ),
+            Some(_) => return None,
+            None => "NOT EXISTS(SELECT 1 FROM plink WHERE cid=x.rid)".to_string(),
+        };
+        let sql = format!(
+            "SELECT b.uuid FROM tagxref x JOIN tag t ON t.tagid=x.tagid \
+             JOIN blob b ON b.rid=x.rid WHERE t.tagname='wiki-{}' AND x.tagtype>0 AND {parent}",
+            page.replace('\'', "''")
+        );
+        let repo = self.repo_arg();
+        let listed = self
+            .run(
+                &["sql", "--readonly", "-R", &repo, &sql],
+                None,
+                self.inner.limits,
+            )
+            .await
+            .ok()
+            .filter(ProcOutput::success)?;
+        let candidates: Vec<String> = String::from_utf8_lossy(&listed.stdout)
+            .lines()
+            .map(|l| l.trim().trim_matches('\'').to_string())
+            .filter(|l| alnum(l))
+            .collect();
+        if candidates.len() > MAX_CANDIDATES {
+            return None;
+        }
+        let mut limits = self.inner.limits;
+        limits.stdout_max = limits.stdout_max.saturating_mul(4);
+        let mut matched = None;
+        for uuid in candidates {
+            let Ok(art) = self
+                .run(&["artifact", &uuid, "-R", &repo], None, limits)
+                .await
+            else {
+                return None;
+            };
+            if art.success() && wiki_body(&art.stdout) == Some(content) {
+                if matched.is_some() {
+                    return None;
+                }
+                matched = Some(uuid);
+            }
+        }
+        matched
     }
 
     fn journal(&self) -> Result<&Journal, ErrorCode> {
@@ -437,14 +501,9 @@ impl FossilWiki {
             Err(e) => CommitOutcome::Unproven(proc_error_code(e)),
             Ok(o) if !o.success() => CommitOutcome::Unproven(ErrorCode::CommitUnconfirmed),
             Ok(_) => {
-                let revision = match self.head(&req.page_name).await {
-                    Ok(Head::Present { uuid, parent, .. })
-                        if prev.as_deref() != Some(uuid.as_str()) && parent == prev =>
-                    {
-                        Some(uuid)
-                    }
-                    _ => None,
-                };
+                let revision = self
+                    .attribute(prev.as_deref(), &req.page_name, req.content.as_bytes())
+                    .await;
                 CommitOutcome::Committed { revision }
             }
         };

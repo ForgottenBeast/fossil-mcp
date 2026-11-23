@@ -50,7 +50,8 @@ case "$sub" in
     if [ -f "$D/uuid" ]; then
       p=""; [ -f "$D/parent" ] && p=$(cat "$D/parent")
       [ -f "$D/force_parent" ] && p=$(cat "$D/force_parent")
-      printf '{"payload":{"name":"P","uuid":"%s","parent":"%s","content":"x"}}\n' "$(cat "$D/uuid")" "$p"
+      h=$(cat "$D/uuid"); [ -f "$D/head_override" ] && h=$(cat "$D/head_override")
+      printf '{"payload":{"name":"P","uuid":"%s","parent":"%s","content":"x"}}\n' "$h" "$p"
     else
       printf '{"resultCode":"FOSSIL-3006","resultText":"Wiki page not found"}\n'
     fi
