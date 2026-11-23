@@ -38,7 +38,6 @@ use crate::server::types::{
 };
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
-use tokio::process::Command;
 
 pub mod sync;
 use sync::{sync_repository, SyncError};
@@ -155,6 +154,16 @@ impl FossilWiki {
     pub fn with_limits(mut self, limits: Limits) -> Self {
         self.limits = limits;
         self
+    }
+
+    /// Run the configured `fossil` with the bounded subprocess runner.
+    async fn fossil(
+        &self,
+        args: &[&str],
+        stdin: Option<&[u8]>,
+    ) -> Result<process::ProcOutput, process::ProcError> {
+        let args: Vec<std::ffi::OsString> = args.iter().map(Into::into).collect();
+        process::run(&self.fossil_bin, &args, stdin, &self.limits).await
     }
 
     /// Get the current repository path.
@@ -294,15 +303,12 @@ impl FossilWiki {
     pub async fn list_wiki_pages(&self) -> Result<Json<types::ListWikiPagesResponse>, String> {
         let repo_path = self.get_repository()?;
 
-        let output = Command::new(&self.fossil_bin)
-            .args(["wiki", "-R", &repo_path.to_string_lossy(), "list"])
-            .output()
+        let output = self
+            .fossil(&["wiki", "-R", &repo_path.to_string_lossy(), "list"], None)
             .await
-            .map_err(|e| e.to_string())?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("fossil wiki list failed: {}", stderr));
+            .map_err(|e| format!("fossil wiki list failed: {e:?}"))?;
+        if !output.success() {
+            return Err("fossil wiki list failed".to_string());
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -367,15 +373,12 @@ impl FossilWiki {
     ) -> Result<Json<types::ReadWikiPageResponse>, String> {
         let repo_path = self.get_repository()?;
 
-        let output = Command::new(&self.fossil_bin)
-            .args(["wiki", "-R", &repo_path.to_string_lossy(), "export", &args.0.page_name])
-            .output()
+        let output = self
+            .fossil(&["wiki", "-R", &repo_path.to_string_lossy(), "export", &args.0.page_name], None)
             .await
-            .map_err(|e| e.to_string())?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("fossil wiki export failed: {}", stderr));
+            .map_err(|e| format!("fossil wiki export failed: {e:?}"))?;
+        if !output.success() {
+            return Err("fossil wiki export failed".to_string());
         }
 
         let content = String::from_utf8_lossy(&output.stdout);
@@ -442,59 +445,42 @@ impl FossilWiki {
     ) -> Result<Json<types::WriteWikiPageResponse>, String> {
         let repo_path = self.get_repository()?;
 
-        // Write content to a temporary file
-        let temp_file = format!(
-            "/tmp/fossil_wiki_{}.txt",
-            args.0.page_name.replace("/", "_")
-        );
-        tokio::fs::write(&temp_file, &args.0.content)
+        // Page bytes travel over stdin; no content file ever exists.
+        let repo = repo_path.to_string_lossy().into_owned();
+        let mimetype = args.0.mimetype.as_ref().map(|mt| format!("--mimetype={mt}"));
+        let build = |sub: &'static str| {
+            let mut v = vec!["wiki".to_string(), sub.to_string(), args.0.page_name.clone(), "-R".to_string(), repo.clone()];
+            v.extend(mimetype.clone());
+            v
+        };
+        let this = self;
+        let payload = args.0.content.as_bytes();
+        let run = |v: Vec<String>| async move {
+            let refs: Vec<&str> = v.iter().map(String::as_str).collect();
+            this.fossil(&refs, Some(payload)).await
+        };
+
+        // Try "create" first, then "commit" for existing pages (fresh pipe each time).
+        let mut final_output = run(build("create"))
             .await
-            .map_err(|e| format!("Failed to write temporary file: {}", e))?;
-
-        // Try "create" first, then "commit" if it fails (for existing pages)
-        let mut cmd = Command::new(&self.fossil_bin);
-        cmd.args(["wiki", "-R", &repo_path.to_string_lossy(), "create", &args.0.page_name, &temp_file]);
-
-        if let Some(ref mt) = args.0.mimetype {
-            cmd.arg(format!("--mimetype={}", mt));
-        }
-
-        let output = cmd
-            .output()
-            .await
-            .map_err(|e| format!("Failed to execute fossil wiki create: {}", e))?;
-
-        // If create failed with "already exists" or similar, try commit
-        let mut final_output = output;
-        if !final_output.status.success() {
-            let stderr_str = String::from_utf8_lossy(&final_output.stderr);
-            if stderr_str.contains("already exists") || stderr_str.contains("exists") {
-                let mut cmd = Command::new(&self.fossil_bin);
-                cmd.args(["wiki", "-R", &repo_path.to_string_lossy(), "commit", &args.0.page_name, &temp_file]);
-
-                if let Some(ref mt) = args.0.mimetype {
-                    cmd.arg(format!("--mimetype={}", mt));
-                }
-
-                final_output = cmd
-                    .output()
+            .map_err(|e| format!("fossil wiki create failed: {e:?}"))?;
+        if !final_output.success() {
+            let stderr_str = String::from_utf8_lossy(&final_output.stderr).into_owned();
+            if stderr_str.contains("already exists") {
+                final_output = run(build("commit"))
                     .await
-                    .map_err(|e| format!("Failed to execute fossil wiki commit: {}", e))?;
+                    .map_err(|e| format!("fossil wiki commit failed: {e:?}"))?;
             }
         }
 
-        // Clean up temp file
-        let _ = tokio::fs::remove_file(&temp_file).await;
-
-        if !final_output.status.success() {
-            let stderr = String::from_utf8_lossy(&final_output.stderr);
-            return Err(format!("fossil wiki operation failed: {}", stderr));
+        if !final_output.success() {
+            return Err("fossil wiki operation failed".to_string());
         }
 
         // Handle synchronization if requested
         let mut sync_status = None;
         if !args.0.skip_sync {
-            match sync_repository(&self.fossil_bin, &repo_path).await {
+            match sync_repository(&self.fossil_bin, &repo_path, &self.limits).await {
                 Ok(()) => {
                     sync_status = Some(types::SyncStatus {
                         attempted: true,

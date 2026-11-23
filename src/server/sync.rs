@@ -1,5 +1,6 @@
+use crate::server::process::{self, Limits};
+use std::ffi::OsString;
 use std::path::PathBuf;
-use tokio::process::Command;
 
 /// Errors that can occur during Fossil synchronization
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,14 +16,17 @@ pub enum SyncError {
 }
 
 /// Executes 'fossil sync' and parses errors into appropriate SyncError variants
-pub async fn sync_repository(fossil_bin: &PathBuf, repository_path: &PathBuf) -> Result<(), SyncError> {
-    let output = Command::new(fossil_bin)
-        .args(["sync", "-R", &repository_path.to_string_lossy()])
-        .output()
+pub async fn sync_repository(
+    fossil_bin: &PathBuf,
+    repository_path: &PathBuf,
+    limits: &Limits,
+) -> Result<(), SyncError> {
+    let args: Vec<OsString> = vec!["sync".into(), "-R".into(), repository_path.into()];
+    let output = process::run(fossil_bin, &args, None, limits)
         .await
-        .map_err(|e| SyncError::Other(format!("Failed to execute fossil sync: {}", e)))?;
+        .map_err(|_| SyncError::Other("sync did not complete".to_string()))?;
 
-    if output.status.success() {
+    if output.success() {
         return Ok(());
     }
 
@@ -37,7 +41,7 @@ pub async fn sync_repository(fossil_bin: &PathBuf, repository_path: &PathBuf) ->
     } else if stderr_str.contains("network") || stderr_str.contains("connection") || stderr_str.contains("timeout") {
         Err(SyncError::NetworkError)
     } else {
-        Err(SyncError::Other(stderr_str.to_string()))
+        Err(SyncError::Other("sync failed".to_string()))
     }
 }
 
