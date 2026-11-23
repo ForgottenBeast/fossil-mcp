@@ -668,7 +668,7 @@ impl FossilWiki {
     /// protection yet: `previous_revision` is observed, not enforced.
     #[tool(
         description = "Create or update a wiki page; returns a typed receipt (commit_state, publication_state, revision)",
-        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = true),
+        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = true),
         output_schema = rmcp::handler::server::common::schema_for_type::<WriteToolOutput>()
     )]
     pub async fn write_wiki_page(
@@ -766,7 +766,7 @@ impl FossilWiki {
     /// of an already committed revision. Never creates a wiki artifact.
     #[tool(
         description = "Reconcile an earlier write: report its receipt, optionally retrying only the sync of a committed revision",
-        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = true),
+        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = true),
         output_schema = rmcp::handler::server::common::schema_for_type::<WriteToolOutput>()
     )]
     pub async fn wiki_reconcile_operation(

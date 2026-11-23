@@ -238,14 +238,14 @@ async fn tool_annotations_declare_read_only_and_mutating_tools() {
     let mut c = start_with(&repo, &bin, &[]).await;
     let tools = c.tools().await;
     // name -> (readOnlyHint, destructiveHint, idempotentHint, openWorldHint)
-    // Writes only append Fossil artifacts (history is kept), so none is
-    // destructive; write and reconcile may sync, so they reach the open world.
+    // Write and reconcile replace the visible page content (history stays
+    // append-only) and may sync, so they are destructive and open-world.
     let expected = [
         ("list_wiki_pages", (true, false, true, false)),
         ("read_wiki_page", (true, false, true, false)),
         ("wiki_operation_status", (true, false, true, false)),
-        ("wiki_reconcile_operation", (false, false, true, true)),
-        ("write_wiki_page", (false, false, true, true)),
+        ("wiki_reconcile_operation", (false, true, true, true)),
+        ("write_wiki_page", (false, true, true, true)),
     ];
     for (name, (ro, destructive, idempotent, open)) in expected {
         let t = tools.iter().find(|t| t["name"] == name).unwrap();

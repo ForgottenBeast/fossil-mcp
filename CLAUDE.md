@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is an MCP (Model Context Protocol) server that provides programmatic access to Fossil SCM wiki pages. It exposes three tools for listing, reading, and writing wiki pages in a Fossil repository.
+This is an MCP (Model Context Protocol) server that provides programmatic access to Fossil SCM wiki pages. It exposes five tools: list, read and write wiki pages, plus operation status and reconcile for write receipts.
 
 ## Build and Development Commands
 
@@ -168,8 +168,9 @@ only `fossil sync` for an already committed revision whose publication is `pendi
 (needs `--allow-repository-sync`); it never creates a wiki artifact, and first verifies the recorded
 artifact exists in the bound repository.
 
-**Annotations**: reads and status are `readOnlyHint`; write and reconcile are not read-only, not
-destructive (Fossil history is append-only), idempotent and open-world (they may sync).
+**Annotations**: reads and status are `readOnlyHint`; write and reconcile are not read-only,
+destructive (the visible page content is replaced, although Fossil history is append-only),
+idempotent and open-world (they may sync).
 
 ## Nix Flake Configuration
 
