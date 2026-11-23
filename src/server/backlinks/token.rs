@@ -11,7 +11,10 @@ use super::Origin;
 use super::client::{HttpClient, HttpError};
 use crate::server::secret::{Secret, SecretSource, ZitadelKey};
 use crate::server::types::ErrorCode;
-use jsonwebtoken::{Algorithm, EncodingKey, Header};
+use ring::rand::SystemRandom;
+use ring::signature::{RSA_PKCS1_SHA256, RsaKeyPair};
+use rustls_pki_types::PrivateKeyDer;
+use rustls_pki_types::pem::PemObject;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -82,6 +85,13 @@ impl std::fmt::Debug for TokenCache {
 }
 
 #[derive(Serialize)]
+struct AssertionHeader<'a> {
+    alg: &'static str,
+    typ: &'static str,
+    kid: &'a str,
+}
+
+#[derive(Serialize)]
 struct AssertionClaims<'a> {
     iss: &'a str,
     sub: &'a str,
@@ -90,38 +100,88 @@ struct AssertionClaims<'a> {
     exp: u64,
 }
 
+/// Append `data` as unpadded base64url (RFC 4648 section 5).
+fn push_b64url(out: &mut String, data: &[u8]) {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    for chunk in data.chunks(3) {
+        let n = chunk.iter().fold(0u32, |a, b| (a << 8) | u32::from(*b)) << (8 * (3 - chunk.len()));
+        for i in 0..=chunk.len() {
+            out.push(ALPHABET[((n >> (18 - 6 * i)) & 63) as usize] as char);
+        }
+    }
+}
+
+/// Length of `n` bytes as unpadded base64url.
+fn b64url_len(n: usize) -> usize {
+    (n * 4).div_ceil(3)
+}
+
+/// Load the RSA signing key from a PEM document: PKCS#1 (`RSA PRIVATE KEY`,
+/// what Zitadel issues) or PKCS#8 (`PRIVATE KEY`). ring rejects keys under
+/// 2048 bits. The intermediate DER lives in a rustls-pki-types key that
+/// wipes itself on drop; ring keeps the parsed key and has no wipe hook.
+fn signing_key(pem: &[u8]) -> Result<RsaKeyPair, ErrorCode> {
+    let der = PrivateKeyDer::from_pem_slice(pem).map_err(|_| ErrorCode::CredentialUnavailable)?;
+    match &der {
+        PrivateKeyDer::Pkcs1(k) => RsaKeyPair::from_der(k.secret_pkcs1_der()),
+        PrivateKeyDer::Pkcs8(k) => RsaKeyPair::from_pkcs8(k.secret_pkcs8_der()),
+        _ => return Err(ErrorCode::CredentialUnavailable),
+    }
+    .map_err(|_| ErrorCode::CredentialUnavailable)
+}
+
 /// Sign the JWT-profile assertion `{iss: userId, sub: userId, aud: issuer,
-/// iat, exp: iat + 300}` with header `{alg: RS256, kid: keyId}`.
+/// iat, exp: iat + 300}` with header `{alg: RS256, typ: JWT, kid: keyId}`.
 ///
-/// The result is wiped on drop. Buffers inside the signing library (PEM
-/// decoding, claim serialization) are not reachable from here.
+/// RS256 is RSASSA-PKCS1-v1_5 over SHA-256 from ring (the `rsa` crate, with
+/// its unfixed RUSTSEC-2023-0071 timing leak, is not used). The compact JWS is
+/// assembled by hand in one pre-sized buffer that is wiped on drop; buffers
+/// inside ring and rustls-pki-types are not reachable from here.
 pub fn build_assertion(
     key: &ZitadelKey,
     issuer: &str,
     now_unix: u64,
 ) -> Result<Zeroizing<String>, ErrorCode> {
-    let mut header = Header::new(Algorithm::RS256);
-    header.kid = Some(key.key_id().to_string());
-    let claims = AssertionClaims {
+    let signer = signing_key(key.private_key_pem().expose())?;
+    let header = serde_json::to_vec(&AssertionHeader {
+        alg: "RS256",
+        typ: "JWT",
+        kid: key.key_id(),
+    })
+    .map_err(|_| ErrorCode::CredentialUnavailable)?;
+    let claims = serde_json::to_vec(&AssertionClaims {
         iss: key.user_id(),
         sub: key.user_id(),
         aud: issuer,
         iat: now_unix,
         exp: now_unix + ASSERTION_LIFETIME_SECS,
-    };
-    let signing_key = EncodingKey::from_rsa_pem(key.private_key_pem().expose())
+    })
+    .map_err(|_| ErrorCode::CredentialUnavailable)?;
+    let sig_len = signer.public().modulus_len();
+    let mut jws = Zeroizing::new(String::with_capacity(
+        b64url_len(header.len()) + b64url_len(claims.len()) + b64url_len(sig_len) + 2,
+    ));
+    push_b64url(&mut jws, &header);
+    jws.push('.');
+    push_b64url(&mut jws, &claims);
+    let mut sig = vec![0u8; sig_len];
+    signer
+        .sign(
+            &RSA_PKCS1_SHA256,
+            &SystemRandom::new(),
+            jws.as_bytes(),
+            &mut sig,
+        )
         .map_err(|_| ErrorCode::CredentialUnavailable)?;
-    jsonwebtoken::encode(&header, &claims, &signing_key)
-        .map(Zeroizing::new)
-        .map_err(|_| ErrorCode::CredentialUnavailable)
+    jws.push('.');
+    push_b64url(&mut jws, &sig);
+    Ok(jws)
 }
 
 /// Whether the key's PEM is a usable RSA signing key (startup check; nothing
 /// is signed or sent).
 pub fn check_signing_key(key: &ZitadelKey) -> Result<(), ErrorCode> {
-    EncodingKey::from_rsa_pem(key.private_key_pem().expose())
-        .map(|_| ())
-        .map_err(|_| ErrorCode::CredentialUnavailable)
+    signing_key(key.private_key_pem().expose()).map(|_| ())
 }
 
 /// The token endpoint's answer. `access_token` is wiped on drop, so every
@@ -264,5 +324,45 @@ impl TokenCache {
             expires: Instant::now() + Duration::from_secs(expires_in).min(MAX_LIFETIME),
         });
         Ok(issued)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{b64url_len, push_b64url};
+
+    fn enc(data: &[u8]) -> String {
+        let mut s = String::new();
+        push_b64url(&mut s, data);
+        s
+    }
+
+    #[test]
+    fn base64url_matches_rfc4648_vectors() {
+        for (input, want) in [
+            ("", ""),
+            ("f", "Zg"),
+            ("fo", "Zm8"),
+            ("foo", "Zm9v"),
+            ("foob", "Zm9vYg"),
+            ("fooba", "Zm9vYmE"),
+            ("foobar", "Zm9vYmFy"),
+        ] {
+            assert_eq!(enc(input.as_bytes()), want, "{input:?}");
+        }
+    }
+
+    #[test]
+    fn base64url_uses_the_url_safe_alphabet_without_padding() {
+        assert_eq!(enc(&[0xfb, 0xff, 0xbf]), "-_-_");
+        assert_eq!(enc(&[0xfb, 0xff]), "-_8");
+        assert!(!enc(&[0xff; 17]).contains(['=', '+', '/']));
+    }
+
+    #[test]
+    fn base64url_len_is_exact() {
+        for n in 0..64 {
+            assert_eq!(enc(&vec![0xa5; n]).len(), b64url_len(n), "{n}");
+        }
     }
 }

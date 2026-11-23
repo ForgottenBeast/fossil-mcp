@@ -10,7 +10,6 @@ use fossil_mcp::server::secret::{
     FileSecretSource, MAX_SECRET_BYTES, Secret, SecretError, SecretSource, ZitadelKey,
 };
 use fossil_mcp::server::types::ErrorCode;
-use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use serde_json::{Value, json};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -20,6 +19,82 @@ use std::time::Duration;
 const PRIVATE_PEM: &str = include_str!("fixtures/test-rsa-private.pem");
 const PUBLIC_PEM: &str = include_str!("fixtures/test-rsa-public.pem");
 const SCOPE: &str = "urn:zitadel:iam:org:project:id:42:aud";
+
+// ---- JWT verification with ring (independent of the signing code) ------------
+
+fn b64url_decode(s: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    let (mut acc, mut bits) = (0u32, 0u32);
+    for c in s.bytes() {
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'-' => 62,
+            b'_' => 63,
+            _ => panic!("not base64url: {:?}", c as char),
+        };
+        acc = (acc << 6) | u32::from(v);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+            acc &= (1 << bits) - 1;
+        }
+    }
+    out
+}
+
+/// The PKCS#1 `RSAPublicKey` inside an SPKI `PUBLIC KEY` PEM (what ring's
+/// verifier takes): SEQUENCE { SEQUENCE alg, BIT STRING { 0, RSAPublicKey } }.
+fn rsa_public_key_der(spki_pem: &str) -> Vec<u8> {
+    use rustls_pki_types::SubjectPublicKeyInfoDer;
+    use rustls_pki_types::pem::PemObject;
+    let spki = SubjectPublicKeyInfoDer::from_pem_slice(spki_pem.as_bytes()).unwrap();
+    fn tlv(b: &[u8]) -> (u8, &[u8], &[u8]) {
+        let (tag, len_byte) = (b[0], b[1]);
+        let (len, hdr) = if len_byte & 0x80 == 0 {
+            (usize::from(len_byte), 2)
+        } else {
+            let n = usize::from(len_byte & 0x7f);
+            (
+                b[2..2 + n]
+                    .iter()
+                    .fold(0usize, |a, x| a << 8 | usize::from(*x)),
+                2 + n,
+            )
+        };
+        (tag, &b[hdr..hdr + len], &b[hdr + len..])
+    }
+    let (t, body, _) = tlv(spki.as_ref());
+    assert_eq!(t, 0x30);
+    let (_, _, rest) = tlv(body); // AlgorithmIdentifier
+    let (t, bits, _) = tlv(rest);
+    assert_eq!(t, 0x03);
+    assert_eq!(bits[0], 0, "no unused bits");
+    bits[1..].to_vec()
+}
+
+/// Verify `jwt` as RS256 under `public_pem`; return (header, claims).
+fn verify_rs256(jwt: &str, public_pem: &str) -> (Value, Value) {
+    let parts: Vec<&str> = jwt.split('.').collect();
+    assert_eq!(parts.len(), 3, "compact JWS");
+    let signing_input = format!("{}.{}", parts[0], parts[1]);
+    let sig = b64url_decode(parts[2]);
+    let key = ring::signature::UnparsedPublicKey::new(
+        &ring::signature::RSA_PKCS1_2048_8192_SHA256,
+        rsa_public_key_der(public_pem),
+    );
+    key.verify(signing_input.as_bytes(), &sig)
+        .expect("RS256 signature verifies with the public half");
+    for p in &parts {
+        assert!(!p.contains(['=', '+', '/']), "unpadded base64url: {p}");
+    }
+    (
+        serde_json::from_slice(&b64url_decode(parts[0])).unwrap(),
+        serde_json::from_slice(&b64url_decode(parts[1])).unwrap(),
+    )
+}
 
 fn key_json() -> String {
     json!({"type":"serviceaccount","keyId":"key-1","key":PRIVATE_PEM,"userId":"user-7"}).to_string()
@@ -141,22 +216,10 @@ fn assertion_has_kid_and_profile_claims_and_verifies_with_the_public_half() {
     let now = 1_700_000_000;
     let jwt = build_assertion(&key, issuer, now).unwrap();
 
-    let header = decode_header(&jwt).unwrap();
-    assert_eq!(header.alg, Algorithm::RS256);
-    assert_eq!(header.kid.as_deref(), Some("key-1"));
-
-    let mut v = Validation::new(Algorithm::RS256);
-    v.set_audience(&[issuer]);
-    v.set_issuer(&["user-7"]);
-    v.validate_exp = false; // fixed clock above; exp is asserted explicitly
-    v.set_required_spec_claims(&["aud", "iss", "sub"]);
-    let data = decode::<Value>(
-        &jwt,
-        &DecodingKey::from_rsa_pem(PUBLIC_PEM.as_bytes()).unwrap(),
-        &v,
-    )
-    .expect("verifies with the public key");
-    let c = data.claims;
+    let (header, c) = verify_rs256(&jwt, PUBLIC_PEM);
+    assert_eq!(header["alg"], "RS256");
+    assert_eq!(header["kid"], "key-1");
+    assert_eq!(header["typ"], "JWT");
     assert_eq!(c["iss"], "user-7");
     assert_eq!(c["sub"], "user-7");
     assert_eq!(c["aud"], issuer);
@@ -282,15 +345,9 @@ fn token_request_is_a_jwt_profile_grant_with_scopes() {
     );
     assert_eq!(get("scope"), Some(format!("openid {SCOPE}").as_str()));
     let assertion = get("assertion").unwrap();
-    let mut v = Validation::new(Algorithm::RS256);
-    v.set_audience(&[fake.url().as_str()]);
-    v.set_issuer(&["user-7"]);
-    decode::<Value>(
-        assertion,
-        &DecodingKey::from_rsa_pem(PUBLIC_PEM.as_bytes()).unwrap(),
-        &v,
-    )
-    .expect("assertion verifies, aud is the issuer");
+    let (_, claims) = verify_rs256(assertion, PUBLIC_PEM);
+    assert_eq!(claims["aud"], fake.url().as_str());
+    assert_eq!(claims["iss"], "user-7");
 }
 
 #[test]
@@ -500,4 +557,38 @@ fn client_connect_failure_is_unreachable() {
             .unwrap_err(),
         HttpError::Unreachable
     );
+}
+
+#[test]
+fn pkcs8_pem_keys_sign_too() {
+    let pkcs8 = include_str!("fixtures/test-rsa-private-pkcs8.pem");
+    assert!(pkcs8.starts_with("-----BEGIN PRIVATE KEY-----"));
+    let doc = json!({"type":"serviceaccount","keyId":"key-8","key":pkcs8,"userId":"user-8"});
+    let key = ZitadelKey::parse(&Secret::new(doc.to_string().into_bytes())).unwrap();
+    let jwt = build_assertion(&key, "https://issuer.example", 5).unwrap();
+    let (header, claims) = verify_rs256(&jwt, PUBLIC_PEM);
+    assert_eq!(header["kid"], "key-8");
+    assert_eq!(claims["sub"], "user-8");
+}
+
+#[test]
+fn unsupported_or_weak_keys_are_credential_unavailable() {
+    for pem in [
+        // EC key: not RSA.
+        "-----BEGIN EC PRIVATE KEY-----\nMHcCAQEEIIrYSSNQFaA2Hwf1duRSxKtLUvPkXKd1sPOYU6Fzq2deoAoGCCqGSM49\nAwEHoUQDQgAEJkFg3x5M5NwLPUPUmw0ZEgp37DX+TIOhPqyOpyhnoNQTbxB9gtFe\n8rzA3r9NpyAMZ1J9nIwx08GV3VdW6Z+flA==\n-----END EC PRIVATE KEY-----\n",
+        // Public key where a private one is expected.
+        PUBLIC_PEM,
+        // Valid PEM framing, garbage inside.
+        "-----BEGIN RSA PRIVATE KEY-----\nAAAA\n-----END RSA PRIVATE KEY-----\n",
+        "",
+    ] {
+        let doc = json!({"type":"serviceaccount","keyId":"k","key":pem,"userId":"u"});
+        let key = ZitadelKey::parse(&Secret::new(doc.to_string().into_bytes()));
+        let Ok(key) = key else { continue };
+        assert_eq!(
+            build_assertion(&key, "https://i.example", 1).unwrap_err(),
+            ErrorCode::CredentialUnavailable,
+            "{pem}"
+        );
+    }
 }

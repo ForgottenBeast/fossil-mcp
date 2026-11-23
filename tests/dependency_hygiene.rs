@@ -28,3 +28,18 @@ fn test_key_fixture_is_labelled_test_only() {
     assert!(readme.to_lowercase().contains("throwaway"));
     assert!(readme.to_lowercase().contains("never be reused"));
 }
+
+const LOCK: &str = include_str!("../Cargo.lock");
+
+fn locked(name: &str) -> bool {
+    LOCK.contains(&format!("\nname = \"{name}\"\n"))
+}
+
+#[test]
+fn rsa_crate_is_not_in_the_lockfile() {
+    // RUSTSEC-2023-0071 (Marvin timing attack on `rsa` private-key
+    // operations): assertions are signed with ring instead.
+    assert!(!locked("rsa"), "rsa crate is locked");
+    assert!(!locked("jsonwebtoken"), "jsonwebtoken is locked");
+    assert!(locked("ring"));
+}
