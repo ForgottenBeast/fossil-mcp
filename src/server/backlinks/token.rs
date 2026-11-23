@@ -116,13 +116,30 @@ fn b64url_len(n: usize) -> usize {
     (n * 4).div_ceil(3)
 }
 
+/// Decoded private-key DER that wipes itself.
+///
+/// rustls-pki-types 1.16 implements `Zeroize` for `PrivateKeyDer` but its
+/// buffer has no wiping `Drop`, so the plain value would be freed with the key
+/// bytes still in it. This guard zeroizes on every exit: after the key pair is
+/// built, after the startup validation, and when parsing fails.
+struct WipedDer(PrivateKeyDer<'static>);
+
+impl Drop for WipedDer {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
+
 /// Load the RSA signing key from a PEM document: PKCS#1 (`RSA PRIVATE KEY`,
-/// what Zitadel issues) or PKCS#8 (`PRIVATE KEY`). ring rejects keys under
-/// 2048 bits. The intermediate DER lives in a rustls-pki-types key that
-/// wipes itself on drop; ring keeps the parsed key and has no wipe hook.
+/// what Zitadel issues) or PKCS#8 (`PRIVATE KEY`). ring accepts moduli of
+/// 2047 to 4096 bits and rejects anything outside that range. The decoded DER
+/// is held in a [`WipedDer`], so it is wiped as soon as ring has parsed it;
+/// ring keeps the parsed key and has no wipe hook, and the base64 text is the
+/// PEM already held (and wiped) by the caller's secret.
 fn signing_key(pem: &[u8]) -> Result<RsaKeyPair, ErrorCode> {
-    let der = PrivateKeyDer::from_pem_slice(pem).map_err(|_| ErrorCode::CredentialUnavailable)?;
-    match &der {
+    let der =
+        WipedDer(PrivateKeyDer::from_pem_slice(pem).map_err(|_| ErrorCode::CredentialUnavailable)?);
+    match &der.0 {
         PrivateKeyDer::Pkcs1(k) => RsaKeyPair::from_der(k.secret_pkcs1_der()),
         PrivateKeyDer::Pkcs8(k) => RsaKeyPair::from_pkcs8(k.secret_pkcs8_der()),
         _ => return Err(ErrorCode::CredentialUnavailable),
@@ -184,19 +201,37 @@ pub fn check_signing_key(key: &ZitadelKey) -> Result<(), ErrorCode> {
     signing_key(key.private_key_pem().expose()).map(|_| ())
 }
 
-/// The token endpoint's answer. `access_token` is wiped on drop, so every
-/// early return leaves nothing behind (serde_json's own scratch is not
-/// reachable).
-#[derive(Deserialize)]
-struct TokenResponse {
-    access_token: Option<String>,
-    expires_in: Option<u64>,
+/// A string that is wiped when dropped, deserialized straight from the
+/// response so that no unwiped `String` ever holds it: if a later field fails
+/// to parse, the already-decoded value is dropped here, wiped.
+struct WipedString(Zeroizing<String>);
+
+impl<'de> Deserialize<'de> for WipedString {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl serde::de::Visitor<'_> for V {
+            type Value = WipedString;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a string")
+            }
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<WipedString, E> {
+                Ok(WipedString(Zeroizing::new(v.to_owned())))
+            }
+            fn visit_string<E: serde::de::Error>(self, v: String) -> Result<WipedString, E> {
+                Ok(WipedString(Zeroizing::new(v)))
+            }
+        }
+        d.deserialize_str(V)
+    }
 }
 
-impl Drop for TokenResponse {
-    fn drop(&mut self) {
-        self.access_token.zeroize();
-    }
+/// The token endpoint's answer. The token is never held by an unwiped type
+/// (serde_json's own scratch buffer, used only for strings with escapes, is
+/// not reachable).
+#[derive(Deserialize)]
+struct TokenResponse {
+    access_token: Option<WipedString>,
+    expires_in: Option<u64>,
 }
 
 impl TokenCache {
@@ -291,32 +326,26 @@ impl TokenCache {
             500..=599 => return Err(ErrorCode::BacklinksUnreachable),
             _ => return Err(ErrorCode::BadResponse),
         }
-        let mut parsed: TokenResponse =
+        let parsed: TokenResponse =
             serde_json::from_slice(&resp.body).map_err(|_| ErrorCode::BadResponse)?;
-        // Check `expires_in` before taking the token out, so a rejection
-        // leaves the token inside `parsed`, whose Drop wipes it.
-        let Some(expires_in) = parsed.expires_in else {
-            return Err(ErrorCode::BadResponse);
-        };
-        let Some(mut token) = parsed.access_token.take() else {
+        let (Some(WipedString(token)), Some(expires_in)) = (parsed.access_token, parsed.expires_in)
+        else {
             return Err(ErrorCode::BadResponse);
         };
         if token.is_empty()
             || token.len() > MAX_TOKEN_BYTES
             || !token.bytes().all(|b| (0x21..=0x7e).contains(&b))
         {
-            token.zeroize();
             return Err(ErrorCode::BadResponse);
         }
         // A lifetime inside the refresh margin could never be served from the
         // cache: the issuer's clock or token policy is wrong, so say so.
         if Duration::from_secs(expires_in) <= REFRESH_MARGIN {
-            token.zeroize();
             return Err(ErrorCode::BacklinksAuthFailed);
         }
         st.issued += 1;
         let issued = Token {
-            secret: Secret::new(token.into_bytes()),
+            secret: Secret::new(token.as_bytes().to_vec()),
             generation: st.issued,
         };
         st.cached = Some(Cached {
