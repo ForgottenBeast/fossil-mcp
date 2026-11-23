@@ -233,6 +233,31 @@ async fn catalog_is_stable_and_credential_free() {
 }
 
 #[tokio::test]
+async fn tool_annotations_declare_read_only_and_mutating_tools() {
+    let (repo, bin, _dir) = real_repo();
+    let mut c = start_with(&repo, &bin, &[]).await;
+    let tools = c.tools().await;
+    // name -> (readOnlyHint, destructiveHint, idempotentHint, openWorldHint)
+    // Writes only append Fossil artifacts (history is kept), so none is
+    // destructive; write and reconcile may sync, so they reach the open world.
+    let expected = [
+        ("list_wiki_pages", (true, false, true, false)),
+        ("read_wiki_page", (true, false, true, false)),
+        ("wiki_operation_status", (true, false, true, false)),
+        ("wiki_reconcile_operation", (false, false, true, true)),
+        ("write_wiki_page", (false, false, true, true)),
+    ];
+    for (name, (ro, destructive, idempotent, open)) in expected {
+        let t = tools.iter().find(|t| t["name"] == name).unwrap();
+        let a = &t["annotations"];
+        assert_eq!(a["readOnlyHint"], json!(ro), "{name} readOnlyHint: {a}");
+        assert_eq!(a["destructiveHint"], json!(destructive), "{name}: {a}");
+        assert_eq!(a["idempotentHint"], json!(idempotent), "{name}: {a}");
+        assert_eq!(a["openWorldHint"], json!(open), "{name}: {a}");
+    }
+}
+
+#[tokio::test]
 async fn read_only_mode_denies_writes_but_keeps_catalog() {
     let (repo, bin, _dir) = real_repo();
     let mut c = start_with(&repo, &bin, &[]).await;

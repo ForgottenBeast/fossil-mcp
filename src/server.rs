@@ -526,7 +526,15 @@ impl FossilWiki {
 #[tool_router]
 impl FossilWiki {
     /// Lists all wiki pages in the bound repository.
-    #[tool(description = "List all wiki pages in the bound Fossil repository")]
+    #[tool(
+        description = "List all wiki pages in the bound Fossil repository",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
     pub async fn list_wiki_pages(&self) -> Result<Json<types::ListWikiPagesResponse>, String> {
         let out = self
             .run(
@@ -546,7 +554,15 @@ impl FossilWiki {
     }
 
     /// Reads the exact content and current revision of a page.
-    #[tool(description = "Read the content and current revision of a wiki page")]
+    #[tool(
+        description = "Read the content and current revision of a wiki page",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
     pub async fn read_wiki_page(
         &self,
         args: Parameters<ReadWikiPageArgs>,
@@ -578,6 +594,7 @@ impl FossilWiki {
     /// protection yet: `previous_revision` is observed, not enforced.
     #[tool(
         description = "Create or update a wiki page; returns a typed receipt (commit_state, publication_state, revision)",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = true),
         output_schema = rmcp::handler::server::common::schema_for_type::<WriteToolOutput>()
     )]
     pub async fn write_wiki_page(
@@ -650,6 +667,7 @@ impl FossilWiki {
     /// Returns the stored receipt of an earlier write. Read-only.
     #[tool(
         description = "Return the stored receipt of an earlier write_wiki_page operation",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false),
         output_schema = rmcp::handler::server::common::schema_for_type::<WriteToolOutput>()
     )]
     pub async fn wiki_operation_status(
@@ -675,6 +693,7 @@ impl FossilWiki {
     /// of an already committed revision. Never creates a wiki artifact.
     #[tool(
         description = "Reconcile an earlier write: report its receipt, optionally retrying only the sync of a committed revision",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = true),
         output_schema = rmcp::handler::server::common::schema_for_type::<WriteToolOutput>()
     )]
     pub async fn wiki_reconcile_operation(
