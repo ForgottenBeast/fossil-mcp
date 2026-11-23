@@ -305,14 +305,31 @@ fn cached_token_is_reused() {
 }
 
 #[test]
-fn token_within_sixty_seconds_of_expiry_is_refreshed() {
-    // expires_in = 60 means "expires within the 60 s margin": never cached.
-    let fake = Fake::start(issuer_ok(60));
+fn token_not_outliving_the_refresh_margin_is_an_auth_failure() {
+    // A token that would already be inside the 60 s refresh margin can never
+    // be served from the cache; the issuer is misconfigured, so it is an
+    // operator-visible auth failure, not a token handed out uncached.
+    for expires_in in [0, 1, 59, 60] {
+        let fake = Fake::start(issuer_ok(expires_in));
+        let dir = tempfile::tempdir().unwrap();
+        let c = cache(&fake, dir.path());
+        assert_eq!(
+            c.get().unwrap_err(),
+            ErrorCode::BacklinksAuthFailed,
+            "expires_in {expires_in}"
+        );
+        assert_eq!(fake.count(), 1);
+    }
+}
+
+#[test]
+fn token_just_past_the_refresh_margin_is_cached() {
+    let fake = Fake::start(issuer_ok(61));
     let dir = tempfile::tempdir().unwrap();
     let c = cache(&fake, dir.path());
-    assert_eq!(c.get().unwrap().secret().expose(), b"tok1");
-    assert_eq!(c.get().unwrap().secret().expose(), b"tok2");
-    assert_eq!(fake.count(), 2);
+    c.get().unwrap();
+    c.get().unwrap();
+    assert_eq!(fake.count(), 1);
 }
 
 #[test]
@@ -343,14 +360,17 @@ fn rejected_token_is_replaced_once_and_only_if_still_current() {
 
 #[test]
 fn rotated_key_file_is_picked_up_on_refresh() {
-    let fake = Fake::start(issuer_ok(60));
+    let fake = Fake::start(issuer_ok(3600));
     let dir = tempfile::tempdir().unwrap();
     let c = cache(&fake, dir.path());
-    c.get().unwrap();
+    let first = c.get().unwrap();
     // Rotation: the file now holds an unusable key; the next refresh sees it.
     let bad = json!({"type":"serviceaccount","keyId":"k","key":"nope","userId":"u"});
     write_key(dir.path(), &bad.to_string(), 0o600);
-    assert_eq!(c.get().unwrap_err(), ErrorCode::CredentialUnavailable);
+    assert_eq!(
+        c.refresh_rejected(&first).unwrap_err(),
+        ErrorCode::CredentialUnavailable
+    );
     assert_eq!(fake.count(), 1, "no request without a usable key");
 }
 

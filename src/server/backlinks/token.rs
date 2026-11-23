@@ -240,6 +240,12 @@ impl TokenCache {
             token.zeroize();
             return Err(ErrorCode::BadResponse);
         }
+        // A lifetime inside the refresh margin could never be served from the
+        // cache: the issuer's clock or token policy is wrong, so say so.
+        if Duration::from_secs(expires_in) <= REFRESH_MARGIN {
+            token.zeroize();
+            return Err(ErrorCode::BacklinksAuthFailed);
+        }
         st.issued += 1;
         let issued = Token {
             secret: Secret::new(token.into_bytes()),
