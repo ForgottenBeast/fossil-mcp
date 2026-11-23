@@ -559,6 +559,35 @@ fn client_connect_failure_is_unreachable() {
     );
 }
 
+/// Inside a runtime (an async root, a spawned task, `spawn_blocking`) the
+/// blocking client must work, not panic with "Cannot start a runtime from
+/// within a runtime".
+#[test]
+fn client_works_when_called_from_inside_a_runtime() {
+    let fake = Fake::start(|_, _| Reply::json(200, serde_json::json!({})));
+    let url = format!("{}/x", fake.url());
+    let c = std::sync::Arc::new(client_with(2000, 1024));
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .build()
+        .unwrap();
+    let statuses = rt.block_on(async {
+        let direct = c.get(&url, None).unwrap().status;
+        let post = c.post_form(&url, &[("a", "b")]).unwrap().status;
+        let (c2, u2) = (c.clone(), url.clone());
+        let spawned = tokio::spawn(async move { c2.get(&u2, None).unwrap().status })
+            .await
+            .unwrap();
+        let (c3, u3) = (c.clone(), url.clone());
+        let blocking = tokio::task::spawn_blocking(move || c3.get(&u3, None).unwrap().status)
+            .await
+            .unwrap();
+        [direct, post, spawned, blocking]
+    });
+    assert_eq!(statuses, [200; 4]);
+    assert_eq!(fake.count(), 4);
+}
+
 #[test]
 fn pkcs8_pem_keys_sign_too() {
     let pkcs8 = include_str!("fixtures/test-rsa-private-pkcs8.pem");

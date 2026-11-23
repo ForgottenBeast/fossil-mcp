@@ -42,7 +42,9 @@ All notable changes to this project are documented here. The project follows
   backlinks-specific fixed messages (codes unchanged). The assertion, the form body (the
   same buffer is the request body, no second copy), the `Bearer` header value and token
   response bodies are held in wiping buffers; hyper's own write buffer and the PEM decoder's
-  scratch inside `rustls-pki-types` are not reachable and remain an accepted gap. No HTTP crate in the build can log request bytes: the client
+  scratch inside `rustls-pki-types` are not reachable and remain an accepted gap. The blocking
+  HTTP client no longer panics when called from inside a tokio runtime: it runs on a scoped
+  thread there. No HTTP crate in the build can log request bytes: the client
   is hyper without its unstable `tracing` feature and rustls without `logging` (a replaced
   `ureq` wrote raw request bytes, including the bearer, at TRACE through `log`, which a
   downstream `release_max_level_trace` would have turned back on; tests pin the lockfile and

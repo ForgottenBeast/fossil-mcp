@@ -16,8 +16,9 @@
 //! never does), the environment's proxy settings are never read, error
 //! statuses are returned, not raised, and one connection serves one call.
 //! Errors are a closed enum: no URL, header or body text survives into it.
-//! Calls block (a private current-thread runtime drives each one): run them
-//! under `spawn_blocking`, never directly on an async worker.
+//! Calls block (a private current-thread runtime drives each one, on a scoped
+//! thread when the caller is inside a tokio runtime): run them under
+//! `spawn_blocking`, never directly on an async worker.
 
 use super::percent_encode_into;
 use crate::server::secret::Secret;
@@ -185,6 +186,25 @@ impl HttpClient {
     }
 
     fn call(&self, call: Call<'_>) -> Result<HttpResponse, HttpError> {
+        // `Runtime::block_on` panics when this thread already drives a tokio
+        // runtime (an async task, or a `#[tokio::main]` body). A thread that
+        // belongs to a runtime cannot be told apart from a `spawn_blocking`
+        // thread, where blocking is legitimate, so refusing would break the
+        // supported caller. Run on a fresh scoped thread instead, which has no
+        // runtime context: it never panics and the result is the same. The
+        // call still blocks the calling thread, so async callers should keep
+        // using `spawn_blocking`.
+        if tokio::runtime::Handle::try_current().is_ok() {
+            return std::thread::scope(|s| {
+                s.spawn(|| self.call_blocking(call))
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            });
+        }
+        self.call_blocking(call)
+    }
+
+    fn call_blocking(&self, call: Call<'_>) -> Result<HttpResponse, HttpError> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_io()
             .enable_time()
