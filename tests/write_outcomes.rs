@@ -186,8 +186,8 @@ async fn nonzero_commit_exit_is_unknown() {
 #[tokio::test]
 async fn unattributable_revision_is_unresolved_and_not_published() {
     let f = FakeFossil::new();
-    // A "racing writer": head's parent is not the revision we observed.
-    f.on("create", "echo foreign > \"$D/force_parent\"");
+    // The listing never shows the artifact we wrote.
+    f.on("create", "touch \"$D/hide_ours\"");
     let w = bound(&f, allow_sync).await;
     let r = w
         .write_wiki_page(wargs("op1", "P", "v1", SYNC))
@@ -253,7 +253,8 @@ async fn write_disabled_and_publication_denied_spawn_nothing() {
 /// visible head. Parent equality alone cannot tell it from our artifact.
 const SIBLING: &str = r#"echo sib > "$D/head_override"
 printf 'D t\nL P\nU fx\nW %s\n%s\nZ 00\n' "${SIB_LEN:-4}" "${SIB_BODY:-sibx}" > "$D/artifact_sib"
-printf "'sib'\n'u$id'\n" > "$D/sql_out""#;
+srid=$(( $(cat "$D/rid" 2>/dev/null || echo 0) + 1 )); echo $srid > "$D/rid"
+echo "$srid|sib|$(cat "$D/uuid" 2>/dev/null)|$ph" >> "$D/revs""#;
 
 #[tokio::test]
 async fn sibling_with_same_parent_is_never_returned_as_our_revision() {

@@ -51,6 +51,27 @@ use types::{
     ReadWikiPageArgs, ReconcileOperationArgs, WriteReceipt, WriteWikiPageArgs,
 };
 
+/// Every wiki revision, newest first: `hex(tagname)|rid|uuid|parent uuid`.
+///
+/// The only SQL this server runs. It is a constant: no request-derived text
+/// is ever interpolated; the page is matched in Rust against the hex-decoded
+/// tag name.
+const SQL_WIKI_REVISIONS: &str = "SELECT hex(t.tagname), x.rid, b.uuid, COALESCE(pb.uuid, '') \
+FROM tagxref x JOIN tag t ON t.tagid=x.tagid JOIN blob b ON b.rid=x.rid \
+LEFT JOIN plink p ON p.cid=x.rid LEFT JOIN blob pb ON pb.rid=p.pid \
+WHERE substr(t.tagname, 1, 5)='wiki-' AND x.tagtype>0 ORDER BY x.rid DESC LIMIT 4097";
+
+/// `fossil sql` prints rows in quote mode (`'a',2,'b'`) or list mode (`a|2|b`)
+/// depending on its stdin; both are accepted because no selected value can
+/// contain `,`, `|` or `'` (hex text, integers, artifact ids).
+///
+/// Row cap of [`SQL_WIKI_REVISIONS`] (the query asks for one more).
+const MAX_REVISION_ROWS: usize = 4096;
+
+/// The complete set of SQL strings this server hands to `fossil sql`.
+#[doc(hidden)]
+pub const ATTRIBUTION_SQL: &[&str] = &[SQL_WIKI_REVISIONS];
+
 /// Maximum concurrently running `fossil` children.
 const MAX_ACTIVE_CHILDREN: usize = 4;
 
@@ -61,6 +82,21 @@ fn wiki_body(artifact: &[u8]) -> Option<&[u8]> {
     let nl = rest.iter().position(|b| *b == b'\n')?;
     let size: usize = std::str::from_utf8(&rest[..nl]).ok()?.parse().ok()?;
     rest.get(nl + 1..nl + 1 + size)
+}
+
+fn is_artifact_id(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric())
+}
+
+/// Decodes the hex text produced by SQL `hex()`; `None` when malformed.
+fn unhex(s: &str) -> Option<Vec<u8>> {
+    if !s.len().is_multiple_of(2) {
+        return None;
+    }
+    s.as_bytes()
+        .chunks(2)
+        .map(|c| u8::from_str_radix(std::str::from_utf8(c).ok()?, 16).ok())
+        .collect()
 }
 
 /// Parses the output of `fossil wiki list` into a vector of page names.
@@ -371,40 +407,34 @@ impl FossilWiki {
     /// equals the bytes we wrote. Zero or several matches, or any failure,
     /// give `None` (`revision_unresolved`).
     async fn attribute(&self, prev: Option<&str>, page: &str, content: &[u8]) -> Option<String> {
-        const MAX_CANDIDATES: usize = 16;
-        let alnum = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric());
-        let parent = match prev {
-            Some(p) if alnum(p) => format!(
-                "EXISTS(SELECT 1 FROM plink WHERE cid=x.rid AND pid=(SELECT rid FROM blob WHERE uuid='{p}'))"
-            ),
-            Some(_) => return None,
-            None => "NOT EXISTS(SELECT 1 FROM plink WHERE cid=x.rid)".to_string(),
-        };
-        let sql = format!(
-            "SELECT b.uuid FROM tagxref x JOIN tag t ON t.tagid=x.tagid \
-             JOIN blob b ON b.rid=x.rid WHERE t.tagname='wiki-{}' AND x.tagtype>0 AND {parent}",
-            page.replace('\'', "''")
-        );
         let repo = self.repo_arg();
+        let mut limits = self.inner.limits;
+        limits.stdout_max = limits.stdout_max.saturating_mul(4);
         let listed = self
             .run(
-                &["sql", "--readonly", "-R", &repo, &sql],
+                &["sql", "--readonly", "-R", &repo, SQL_WIKI_REVISIONS],
                 None,
-                self.inner.limits,
+                limits,
             )
             .await
             .ok()
             .filter(ProcOutput::success)?;
-        let candidates: Vec<String> = String::from_utf8_lossy(&listed.stdout)
-            .lines()
-            .map(|l| l.trim().trim_matches('\'').to_string())
-            .filter(|l| alnum(l))
-            .collect();
-        if candidates.len() > MAX_CANDIDATES {
+        let want_tag = format!("wiki-{page}");
+        let stdout = String::from_utf8_lossy(&listed.stdout);
+        if stdout.lines().count() > MAX_REVISION_ROWS {
             return None;
         }
-        let mut limits = self.inner.limits;
-        limits.stdout_max = limits.stdout_max.saturating_mul(4);
+        let candidates: Vec<String> = stdout
+            .lines()
+            .filter_map(|l| {
+                let mut f = l.split([',', '|']).map(|v| v.trim().trim_matches('\''));
+                let (tag, _rid, uuid, parent) = (f.next()?, f.next()?, f.next()?, f.next()?);
+                (unhex(tag)? == want_tag.as_bytes()
+                    && is_artifact_id(uuid)
+                    && Some(parent).filter(|p| !p.is_empty()) == prev)
+                    .then(|| uuid.to_string())
+            })
+            .collect();
         let mut matched = None;
         for uuid in candidates {
             let Ok(art) = self

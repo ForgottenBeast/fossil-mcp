@@ -36,13 +36,17 @@ done
 : > "$D/calls/$id.argv"
 for a in "$@"; do printf '%s\n' "$a" >> "$D/calls/$id.argv"; done
 echo "$sub" > "$D/calls/$id.sub"
+ph=77696B692D$(printf %s "$3" | od -An -tx1 | tr -d ' \n' | tr 'a-f' 'A-F')
 echo $id > "$D/pid.$sub"
 if [ "$sub" = create ] || [ "$sub" = commit ]; then cat > "$D/calls/$id.stdin"; fi
 if [ -f "$D/on_$sub" ]; then . "$D/on_$sub"; fi
 case "$sub" in
   create|commit)
+    prevu=$(cat "$D/uuid" 2>/dev/null)
     [ -f "$D/uuid" ] && cp "$D/uuid" "$D/parent"
     echo "u$id" > "$D/uuid"
+    rid=$(( $(cat "$D/rid" 2>/dev/null || echo 0) + 1 )); echo $rid > "$D/rid"
+    [ -f "$D/hide_ours" ] || echo "$rid|u$id|$prevu|$ph" >> "$D/revs"
     cp "$D/calls/$id.stdin" "$D/content"
     echo "ok"
     ;;
@@ -62,9 +66,10 @@ case "$sub" in
     if [ -f "$D/project_code" ]; then echo "project-code: $(cat "$D/project_code")"; else echo "project-code: PC1"; fi
     ;;
   sql)
-    # Candidate artifacts (parent/content filtering is done by the real SQL).
-    if [ -f "$D/sql_out" ]; then cat "$D/sql_out"
-    elif [ -f "$D/uuid" ] && [ ! -f "$D/force_parent" ]; then echo "'$(cat "$D/uuid")'"; fi
+    # Emulates the module's fixed wiki-revision query: 'hex(tagname)',rid,'uuid','parent' (quote mode)
+    if [ -f "$D/revs" ]; then
+      sort -t'|' -k1 -nr "$D/revs" | while IFS='|' read -r r u p h; do echo "'$h',$r,'$u','$p'"; done
+    fi
     ;;
   artifact)
     [ -f "$D/missing_artifact" ] && exit 1

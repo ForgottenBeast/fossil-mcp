@@ -49,6 +49,8 @@ All notable changes to this project are documented here. The project follows
 
 ### Security
 - Child output, paths and content never reach tool errors.
+- Revision attribution runs one constant SQL query; page names are never interpolated into
+  SQL (the page is matched in Rust against the hex-decoded tag name).
 
 ### Documentation
 - `CLAUDE.md` documents the receipt API instead of `skip_sync` / `force_write`.
