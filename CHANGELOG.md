@@ -32,7 +32,18 @@ All notable changes to this project are documented here. The project follows
   New error codes: `cursor_stale`, `backlinks_unavailable`, `backlinks_forbidden`,
   `backlinks_repo_mismatch`, `backlinks_auth_failed`, `backlinks_unreachable`,
   `credential_unavailable`. The server gains an HTTP client again (`ureq` with rustls and
-  WebPKI roots, no OpenSSL) plus `jsonwebtoken` (RustCrypto backend), `zeroize` and `base64`.
+  WebPKI roots, no OpenSSL), `ring` (RS256 signing of the assertion, so the `rsa` crate and
+  RUSTSEC-2023-0071 are not in the lockfile), `rustls-pki-types` (PEM), `zeroize` and `log`.
+  The key file is checked once at startup (a missing, unsafe or unparseable file stops the
+  server with a pathless message) and still read again on every refresh. Token responses
+  with `expires_in` of 60 s or less are `backlinks_auth_failed`. `checked_at` must be a valid
+  RFC 3339 timestamp. `timeout` and `bad_response` from the backlinks path carry
+  backlinks-specific fixed messages (codes unchanged). The assertion, the form body and token
+  response bodies are held in wiping buffers. Dependency TRACE/DEBUG logging (ureq-proto
+  writes raw request bytes, including the bearer, at TRACE) is compiled out through `log`'s
+  `max_level_info`, independent of the logger an embedding application installs; this also
+  silences other `log`-crate DEBUG/TRACE output in the same build. The test RSA key under
+  `tests/fixtures` is a labelled throwaway.
   Library: `WikiConfig::backlinks: Option<BacklinksConfig>`.
 - `wiki_operation_status`, `wiki_reconcile_operation`, private receipt journal.
 - Bounded subprocess runner; tests with throwaway repositories, fake-fossil fault
