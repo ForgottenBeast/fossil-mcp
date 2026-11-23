@@ -42,6 +42,8 @@ All notable changes to this project are documented here. The project follows
   the page's artifacts whose parent is the pre-write head, and the single one whose wiki
   body equals the written bytes wins. A concurrent sibling is never returned; zero or
   several matches give `revision_unresolved`.
+- Every `fossil` child runs in its own process group and the whole group is killed on
+  deadline, output overflow and cancellation, so forked descendants no longer outlive them.
 
 ### Security
 - Child output, paths and content never reach tool errors.

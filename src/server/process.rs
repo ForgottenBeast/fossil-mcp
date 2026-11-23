@@ -2,7 +2,8 @@
 //!
 //! Every child gets: piped stdin (closed after the payload), concurrent capped
 //! stdout/stderr drains, one wall-clock deadline covering write + wait, and
-//! `kill_on_drop` so cancellation reaps it. Callers never see raw child bytes
+//! its own process group that is killed as a whole on timeout, output
+//! overflow and cancellation, so descendants cannot outlive the deadline. Callers never see raw child bytes
 //! in an error; they get a [`ProcError`] kind.
 
 use std::ffi::OsString;
@@ -79,6 +80,30 @@ async fn drain<R: AsyncRead + Unpin>(mut r: R, max: usize) -> Result<Vec<u8>, Pr
     }
 }
 
+/// Kills the child's whole process group when dropped while still armed.
+///
+/// The group id equals the child's pid; the child stays unreaped (a zombie
+/// at worst) until the group is signalled, so the id cannot have been reused.
+struct GroupGuard(Option<i32>);
+
+impl GroupGuard {
+    fn kill(&mut self) {
+        if let Some(pgid) = self.0.take() {
+            // SAFETY: plain syscall with integer arguments; a stale or
+            // absent group just yields ESRCH.
+            unsafe {
+                libc::killpg(pgid, libc::SIGKILL);
+            }
+        }
+    }
+}
+
+impl Drop for GroupGuard {
+    fn drop(&mut self) {
+        self.kill();
+    }
+}
+
 /// Run `bin args…` with `stdin` bytes under `limits`.
 pub async fn run(
     bin: &Path,
@@ -96,8 +121,10 @@ pub async fn run(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
+        .process_group(0)
         .spawn()
         .map_err(|_| ProcError::Spawn)?;
+    let mut guard = GroupGuard(child.id().and_then(|p| i32::try_from(p).ok()));
 
     let mut child_stdin = child.stdin.take();
     let out = child.stdout.take().expect("stdout piped");
@@ -130,7 +157,9 @@ pub async fn run(
         Err(_) => Err(ProcError::Timeout),
     };
     if res.is_err() {
-        let _ = child.kill().await; // kill + reap on every known error path
+        guard.kill(); // the whole group first, while the child is unreaped
+        let _ = child.kill().await; // then kill + reap on every known error path
     }
+    guard.0 = None; // finished normally: nothing left to signal
     res
 }
