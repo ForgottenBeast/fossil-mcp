@@ -436,11 +436,15 @@ impl FossilWiki {
     /// the page revisions with a larger `rid` are exactly those created
     /// meanwhile, by us or by a concurrent writer, whatever their parent.
     /// The one accepted is the single such revision whose wiki body equals
-    /// the bytes we wrote. Zero or several matches (a concurrent writer
-    /// with the same bytes is indistinguishable), a listing that does not
-    /// reach back to the baseline, or any failure give `None`
-    /// (`revision_unresolved`). Ids are monotonic unless the repository is
-    /// purged or restored mid-write, which no content check can detect.
+    /// the bytes we wrote, and only if every candidate was read and parsed:
+    /// a failed fetch (nonzero exit, runner error, timeout, output cap) or a
+    /// missing/unparseable W card gives `None`, as do zero or several
+    /// matches (a concurrent writer with the same bytes is indistinguishable)
+    /// and a listing that does not reach back to the baseline
+    /// (`revision_unresolved`). So another writer's revision is returned only
+    /// if it is the sole readable same-bytes revision after the baseline,
+    /// which needs ids to stay monotonic: a purge or restore mid-write can
+    /// break that, and no content check can detect it.
     async fn attribute(&self, baseline: u64, page: &str, content: &[u8]) -> Option<String> {
         let repo = self.repo_arg();
         let mut limits = self.inner.limits;
@@ -482,7 +486,11 @@ impl FossilWiki {
                 .run(&["artifact", uuid, "-R", &repo], None, limits)
                 .await
                 .ok()?;
-            if art.success() && wiki_body(&art.stdout) == Some(content) {
+            if !art.success() {
+                return None; // an unread candidate could be ours: no uniqueness claim
+            }
+            let body = wiki_body(&art.stdout)?; // no parseable W card: same
+            if body == content {
                 if matched.is_some() {
                     return None;
                 }

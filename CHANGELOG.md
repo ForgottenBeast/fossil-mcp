@@ -44,9 +44,12 @@ All notable changes to this project are documented here. The project follows
 - The committed revision is attributed by content among every revision of the page
   created after a blob-id baseline read just before the commit (neither `fossil wiki
   create` nor `commit` prints the new artifact id on 2.27 or 2.28): the single one whose
-  wiki body equals the written bytes wins. A concurrent writer, whatever its parent, is
-  never returned; zero or several matches (including a same-bytes writer racing our
-  commit) give `revision_unresolved`. No baseline means no commit (`preflight_failed`).
+  wiki body equals the written bytes wins, provided every candidate was read and parsed.
+  A candidate whose read fails (nonzero exit, timeout, output cap) or whose W card does
+  not parse gives `revision_unresolved`, never a skip, as do zero or several matches
+  (including a same-bytes writer racing our commit). Another writer's revision can be
+  returned only if it is the sole readable same-bytes revision after the baseline, and
+  only if blob ids stay monotonic (a purge or restore mid-write can break that). No baseline means no commit (`preflight_failed`).
 - Every `fossil` child runs in its own process group and the whole group is killed when the
   call ends (exit, deadline, output overflow, cancellation), so forked descendants no longer
   outlive it. The leader is watched through a pidfd and reaped only after the group was

@@ -1,8 +1,8 @@
 //! Attribution against real Fossil with a competing writer, injected through
 //! a wrapper that runs the racer at a chosen point. Same bytes, same page.
 mod common;
-use common::{parse, real_repo, wargs};
-use fossil_mcp::server::types::{ErrorCode, Publication, ReadWikiPageArgs};
+use common::{FakeFossil, bound, parse, real_repo, wargs};
+use fossil_mcp::server::types::{CommitState, ErrorCode, Publication, ReadWikiPageArgs};
 use fossil_mcp::{FossilWiki, WikiConfig};
 use rmcp::handler::server::wrapper::Parameters;
 use std::fs;
@@ -123,4 +123,75 @@ async fn racer_before_commit_still_resolves_to_c() {
         .unwrap()
         .0;
     assert_eq!(head.revision, revs[2]);
+}
+
+/// Our commit C and a same-bytes writer D (parent C) both qualify. Reading C
+/// fails (wrapper exits 1 for `artifact <C>`): D must not be returned as ours.
+#[tokio::test]
+async fn real_unreadable_own_candidate_with_same_bytes_rival_is_unresolved() {
+    let (repo, bin, dir) = real_repo();
+    let d = dir.path();
+    fs::write(d.join("body"), "new").unwrap();
+    let wrapper = d.join("wrapper");
+    let script = format!(
+        r#"#!/bin/sh
+if [ "$1" = sql ]; then
+  for a; do last="$a"; done
+  case "$last" in *hex*)
+    '{bin}' sql -R '{repo}' "SELECT uuid FROM blob WHERE rid=(SELECT MAX(rid) FROM blob)" | tr -d "'" > '{d}/own'
+    '{bin}' wiki commit P -R '{repo}' < '{d}/body' >/dev/null
+  ;; esac
+fi
+if [ "$1" = artifact ] && [ -f '{d}/own' ] && [ "$2" = "$(cat '{d}/own')" ]; then exit 1; fi
+exec '{bin}' "$@"
+"#,
+        bin = bin.display(),
+        repo = repo.display(),
+        d = d.display()
+    );
+    fs::write(&wrapper, script).unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    let w = wiki(&repo, wrapper, d).await;
+    let rc = parse(
+        &w.write_wiki_page(wargs("op", "P", "new", Publication::LocalOnly))
+            .await
+            .unwrap(),
+    )
+    .receipt
+    .unwrap();
+    assert_eq!(rc.commit_state, CommitState::Committed, "{rc:?}");
+    assert_eq!(rc.revision, None, "{rc:?}");
+    assert_eq!(rc.error_code, Some(ErrorCode::RevisionUnresolved), "{rc:?}");
+}
+
+const RIVAL: &str = "printf '2|competitor||77696B692D50\\n' >> \"$D/revs\"; printf 'D t\\nL P\\nU fx\\nW 3\\nnew\\nZ 00\\n' > \"$D/artifact_competitor\"";
+
+async fn fake_unresolved(own_artifact: &str) {
+    let f = FakeFossil::new();
+    f.on("create", RIVAL);
+    f.on("artifact", own_artifact);
+    let w = bound(&f, |_| {}).await;
+    let rc = parse(
+        &w.write_wiki_page(wargs("op", "P", "new", Publication::LocalOnly))
+            .await
+            .unwrap(),
+    )
+    .receipt
+    .unwrap();
+    assert_eq!(rc.commit_state, CommitState::Committed, "{rc:?}");
+    assert_eq!(rc.revision, None, "{rc:?}");
+    assert_eq!(rc.error_code, Some(ErrorCode::RevisionUnresolved), "{rc:?}");
+}
+
+/// Fake fixture: reading our own artifact exits nonzero.
+#[tokio::test]
+async fn fake_failed_own_artifact_read_is_unresolved() {
+    fake_unresolved("if [ \"$2\" = \"$(cat \"$D/uuid\")\" ]; then exit 1; fi").await;
+}
+
+/// Fake fixture: our own artifact has no parseable W card.
+#[tokio::test]
+async fn fake_unparseable_own_artifact_is_unresolved() {
+    fake_unresolved("if [ \"$2\" = \"$(cat \"$D/uuid\")\" ]; then printf 'garbage\\n'; exit 0; fi")
+        .await;
 }
