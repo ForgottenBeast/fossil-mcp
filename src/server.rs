@@ -258,7 +258,10 @@ impl FossilWiki {
             .as_ref()
             .map(BacklinksService::new)
             .transpose()
-            .map_err(|_| StartupError::InvalidBacklinksConfig)?
+            .map_err(|e| match e {
+                backlinks::InitError::InvalidConfig => StartupError::InvalidBacklinksConfig,
+                backlinks::InitError::Credential => StartupError::BacklinksCredentialUnavailable,
+            })?
             .map(Arc::new);
         let journal = if cfg.allow_local_writes {
             let dir = cfg

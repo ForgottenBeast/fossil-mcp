@@ -660,3 +660,74 @@ async fn concurrent_calls_share_one_token_request() {
     assert_eq!(hits.load(Ordering::SeqCst), 3);
     assert_eq!(e.issuer.count(), 1, "single flight");
 }
+
+// ---- fail fast on the key file ---------------------------------------------------
+
+#[tokio::test]
+async fn startup_fails_on_an_unusable_key_file() {
+    let e = env(|_, _| Reply::json(200, page_body(json!([]))), 3600);
+    let cfg = |key_file: &std::path::Path| BacklinksConfig {
+        url: e.sidecar.url(),
+        issuer: e.issuer.url(),
+        key_file: key_file.to_path_buf(),
+        audience_scopes: vec!["s".into()],
+        timeout: Duration::from_millis(5000),
+    };
+    let write = |name: &str, content: &str, mode: u32| {
+        let p = e.fossil.dir.path().join(name);
+        std::fs::write(&p, content).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode)).unwrap();
+        p
+    };
+    let good_doc = json!({"type":"serviceaccount","keyId":"k","key":PRIVATE_PEM,"userId":"u"});
+    let not_a_key = json!({"type":"serviceaccount","keyId":"k","key":"nope","userId":"u"});
+    let wrong_type = json!({"type":"application","keyId":"k","key":PRIVATE_PEM,"userId":"u"});
+    let big = "x".repeat(20_000);
+    let link = e.fossil.dir.path().join("link.json");
+    std::os::unix::fs::symlink(&e.key_file, &link).unwrap();
+    let cases: Vec<(&str, std::path::PathBuf)> = vec![
+        ("missing", e.fossil.dir.path().join("absent.json")),
+        (
+            "mode 0644",
+            write("loose.json", &good_doc.to_string(), 0o644),
+        ),
+        ("not json", write("junk.json", "not json", 0o600)),
+        (
+            "not a pem",
+            write("nopem.json", &not_a_key.to_string(), 0o600),
+        ),
+        (
+            "wrong type",
+            write("type.json", &wrong_type.to_string(), 0o600),
+        ),
+        ("oversize", write("big.json", &big, 0o600)),
+        ("symlink", link),
+        ("directory", e.fossil.dir.path().to_path_buf()),
+    ];
+    for (name, path) in cases {
+        let mut wc = fossil_mcp::WikiConfig::new("repo1", e.fossil.repo_file());
+        wc.fossil_bin = e.fossil.bin.clone();
+        wc.backlinks = Some(cfg(&path));
+        let r = FossilWiki::bind(wc).await;
+        assert!(
+            matches!(
+                r,
+                Err(fossil_mcp::StartupError::BacklinksCredentialUnavailable)
+            ),
+            "{name}: {:?}",
+            r.as_ref().err()
+        );
+    }
+    assert_eq!(
+        e.issuer.count() + e.sidecar.count(),
+        0,
+        "startup is offline"
+    );
+}
+
+#[test]
+fn startup_credential_error_text_is_fixed_and_pathless() {
+    let t = fossil_mcp::StartupError::BacklinksCredentialUnavailable.to_string();
+    assert!(t.contains("key file"), "{t}");
+    assert!(!t.contains('/'), "{t}");
+}

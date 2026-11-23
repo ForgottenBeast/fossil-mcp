@@ -89,6 +89,9 @@ pub enum StartupError {
     StateDirUnavailable,
     /// The `wiki_backlinks` configuration is invalid.
     InvalidBacklinksConfig,
+    /// The backlinks key file is missing, unsafe or not a usable key (checked
+    /// once at startup; it is read again on every token refresh).
+    BacklinksCredentialUnavailable,
 }
 
 impl std::fmt::Display for StartupError {
@@ -107,6 +110,10 @@ impl std::fmt::Display for StartupError {
             Self::InvalidBacklinksConfig => {
                 "invalid backlinks configuration (https origins without a path, at least one \
                  audience scope, a timeout of 1000-60000 ms)"
+            }
+            Self::BacklinksCredentialUnavailable => {
+                "the backlinks key file is missing, unsafe or not a usable key \
+                 (regular file, no symlink, at most 16 KiB, no access for others)"
             }
         })
     }

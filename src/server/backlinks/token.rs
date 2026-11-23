@@ -116,6 +116,14 @@ pub fn build_assertion(
         .map_err(|_| ErrorCode::CredentialUnavailable)
 }
 
+/// Whether the key's PEM is a usable RSA signing key (startup check; nothing
+/// is signed or sent).
+pub fn check_signing_key(key: &ZitadelKey) -> Result<(), ErrorCode> {
+    EncodingKey::from_rsa_pem(key.private_key_pem().expose())
+        .map(|_| ())
+        .map_err(|_| ErrorCode::CredentialUnavailable)
+}
+
 /// The token endpoint's answer. `access_token` is wiped on drop, so every
 /// early return leaves nothing behind (serde_json's own scratch is not
 /// reachable).

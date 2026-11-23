@@ -15,8 +15,9 @@ fossil-mcp --repo-id notes -R /path/to/repo.fossil \
 - `--backlinks-url`, `--backlinks-issuer`: `https://host[:port]`, no path. Plain `http` is
   accepted only for `127.0.0.1` and `[::1]`.
 - `--backlinks-key-file`: Zitadel machine-user key JSON. It must be a regular file (not a
-  symlink), at most 16 KiB, with no access for others and no group write. It is read on every
-  token refresh, so a rotated key needs no restart. The credential is never taken from the
+  symlink), at most 16 KiB, with no access for others and no group write. It is checked once at startup (a missing, unsafe or
+  unparseable file stops the server) and read again on every token refresh, so a rotated key
+  needs no restart. The credential is never taken from the
   environment or from a tool argument.
 - `--backlinks-audience-scope`: repeatable; `openid` is always requested.
 - `--backlinks-timeout-ms`: per HTTP call, 1000-60000, default 10000.
