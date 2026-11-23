@@ -156,7 +156,7 @@ pub fn isolated_fossil(dir: &Path) -> PathBuf {
     fs::write(
         &bin,
         format!(
-            "#!/bin/sh\nHOME='{}' XDG_CONFIG_HOME='{}' exec '{}' \"$@\"\n",
+            "#!/bin/sh\nHOME='{}' XDG_CONFIG_HOME='{}' USER=fixture LOGNAME=fixture exec '{}' \"$@\"\n",
             home.display(),
             home.display(),
             real.display()
@@ -183,10 +183,16 @@ pub fn real_repo() -> (PathBuf, PathBuf, tempfile::TempDir) {
     let repo = dir.path().join("test.fossil");
     let st = std::process::Command::new(&bin)
         .arg("new")
+        .arg("--admin-user")
+        .arg("fixture")
         .arg(&repo)
         .output()
         .expect("fossil new");
-    assert!(st.status.success(), "fossil new failed");
+    assert!(
+        st.status.success(),
+        "fossil new failed: {}",
+        String::from_utf8_lossy(&st.stderr)
+    );
     (repo, bin, dir)
 }
 

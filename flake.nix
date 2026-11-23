@@ -41,7 +41,7 @@
               # package gate; it builds throwaway repositories with fossil.
               doCheck = true;
               nativeCheckInputs = [ pkgs.fossil ];
-              preCheck = "export HOME=$TMPDIR";
+              preCheck = "export HOME=$TMPDIR USER=nixbld LOGNAME=nixbld";
               nativeBuildInputs = with pkgs; [ cmake pkg-config autoPatchelfHook makeWrapper ];
               # Pin the runtime: the server finds fossil through this PATH prefix.
               postInstall = ''
