@@ -88,7 +88,11 @@ pub async fn run(
 ) -> Result<ProcOutput, ProcError> {
     let mut child = Command::new(bin)
         .args(args)
-        .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
+        .stdin(if stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)

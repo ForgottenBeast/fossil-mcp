@@ -1,64 +1,67 @@
 //! MCP server implementation for Fossil SCM wiki operations.
 //!
-//! This module provides the core [`FossilWiki`] handler that implements
-//! the three MCP tools for wiki page manipulation. All operations execute
-//! `fossil` commands with the `-R` repository flag.
+//! [`FossilWiki`] is bound to exactly one repository at construction
+//! ([`FossilWiki::bind`]); nothing a client sends can change that binding.
+//! The stable tool catalog is `list_wiki_pages`, `read_wiki_page`,
+//! `write_wiki_page`, `wiki_operation_status` and `wiki_reconcile_operation`.
+//! Writes and reconciliation are disabled unless the operator opts in.
 //!
-//! ## Tool Overview
-//!
-//! - **list_wiki_pages**: Returns an array of all wiki page names
-//! - **read_wiki_page**: Retrieves the content of a specific page
-//! - **write_wiki_page**: Creates or updates a page with optional sync
-//!
-//! ## Example
+//! Every `fossil` child runs under the bounded runner in [`process`]; page
+//! bytes travel over stdin and no temporary content file exists. Failures
+//! surface as fixed [`types::ErrorCode`]s, never raw child output.
 //!
 //! ```rust,no_run
-//! use fossil_mcp::server::FossilWiki;
-//! use std::path::PathBuf;
+//! use fossil_mcp::{FossilWiki, WikiConfig};
 //!
-//! # async fn example() {
-//! let wiki = FossilWiki::new(Some(PathBuf::from("/path/to/repo.fossil")));
-//!
-//! // Use with MCP server infrastructure
-//! // The handler implements ServerHandler trait for rmcp
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! let wiki = FossilWiki::bind(WikiConfig::new("notes", "/path/to/repo.fossil")).await?;
+//! // Hand `wiki` to rmcp's `ServiceExt::serve` with a stdio transport.
+//! # let _ = wiki;
+//! # Ok(())
 //! # }
 //! ```
 
-use anyhow::Result;
 use rmcp::{
-    Json,
+    ErrorData, Json,
     handler::server::{ServerHandler, tool::ToolRouter, wrapper::Parameters},
-    model::{ServerCapabilities, ServerInfo},
+    model::{CallToolResult, ServerCapabilities, ServerInfo},
     tool, tool_router,
 };
-
-use crate::server::types::{
-    AuthenticateWikiArgs, ConfigureRepositoryArgs, ReadWikiPageArgs, WriteWikiPageArgs,
-    SearchWikiArgs,
-};
+use serde::{Deserialize, Serialize};
+use std::ffi::OsString;
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use tokio::sync::{Mutex, Semaphore};
 
-pub mod sync;
-use sync::{sync_repository, SyncError};
-
+pub mod binding;
+pub mod operations;
+pub mod outcome;
+pub mod process;
 pub mod types;
 
-pub use process::Limits;
-pub mod process;
+use binding::{RepositoryBinding, StartupError, WikiConfig};
+use operations::{Journal, JournalError, Record, StoredRequest, valid_operation_id};
+use outcome::{
+    CommitOutcome, PublishOutcome, ReceiptBase, build_receipt, classify_sync, proc_error_code,
+};
+use process::{Limits, ProcError, ProcOutput};
+use types::{
+    ErrorCode, MAX_CONTENT_BYTES, MAX_PAGE_NAME_BYTES, OperationStatusArgs, Publication,
+    ReadWikiPageArgs, ReconcileOperationArgs, WriteReceipt, WriteWikiPageArgs,
+};
+
+/// Maximum concurrently running `fossil` children.
+const MAX_ACTIVE_CHILDREN: usize = 4;
 
 /// Parses the output of `fossil wiki list` into a vector of page names.
 ///
 /// Filters out empty lines and trims whitespace from each page name.
 ///
-/// # Examples
-///
 /// ```
 /// use fossil_mcp::server::parse_wiki_list;
 ///
 /// let output = "HomePage\n  About  \n\nDocs/API\n";
-/// let pages = parse_wiki_list(output);
-/// assert_eq!(pages, vec!["HomePage", "About", "Docs/API"]);
+/// assert_eq!(parse_wiki_list(output), vec!["HomePage", "About", "Docs/API"]);
 /// ```
 pub fn parse_wiki_list(output: &str) -> Vec<String> {
     output
@@ -68,727 +71,533 @@ pub fn parse_wiki_list(output: &str) -> Vec<String> {
         .collect()
 }
 
-/// MCP handler for Fossil SCM wiki operations.
-///
-/// This struct provides MCP tools for interacting with a Fossil repository's
-/// wiki pages. All operations use `fossil -R <repo>` to work without requiring a
-/// checkout directory.
-///
-/// The repository path can be set at construction time or configured at runtime
-/// using the configure_repository tool.
-///
-/// # Thread Safety
-///
-/// `FossilWiki` is `Clone` and can be safely shared across async tasks. The
-/// repository path is wrapped in `Arc<RwLock<Option<PathBuf>>>` for thread-safe
-/// runtime configuration.
-///
-/// # Example
-///
-/// ```rust,no_run
-/// use fossil_mcp::FossilWiki;
-/// use std::path::PathBuf;
-///
-/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// // Create handler with repository
-/// let wiki = FossilWiki::new(Some(PathBuf::from("/path/to/repo.fossil")));
-///
-/// // Or create without repository and configure later
-/// let wiki = FossilWiki::new(None);
-/// // Use configure_repository tool to set path at runtime
-///
-/// // The handler exposes MCP tools:
-/// // - configure_repository(args) - Set repository path at runtime
-/// // - list_wiki_pages() - List all wiki pages
-/// // - read_wiki_page(args) - Read a wiki page
-/// // - write_wiki_page(args) - Create/update a wiki page
-/// // - search_wiki(args) - Search wiki via semantic search API
-/// # Ok(())
-/// # }
-/// ```
-#[derive(Clone)]
-pub struct FossilWiki {
-    repository: Arc<RwLock<Option<PathBuf>>>,
+/// Whether `name` is an acceptable wiki page name: non-empty, at most 256
+/// bytes, no NUL/CR/LF, and not option-like (leading `-`).
+pub fn valid_page_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MAX_PAGE_NAME_BYTES
+        && !name.starts_with('-')
+        && !name.bytes().any(|b| b == 0 || b == b'\n' || b == b'\r')
+}
+
+/// Validate a write request into the bytes retained for replay.
+pub fn validate_write(args: &WriteWikiPageArgs) -> Result<StoredRequest, ErrorCode> {
+    if !valid_operation_id(&args.operation_id)
+        || !valid_page_name(&args.page_name)
+        || args.content.len() > MAX_CONTENT_BYTES
+    {
+        return Err(ErrorCode::InvalidArgument);
+    }
+    Ok(StoredRequest {
+        page_name: args.page_name.clone(),
+        content: args.content.clone(),
+        mimetype: args.mimetype,
+        publication: args.publication,
+    })
+}
+
+/// Structured output of the write-family tools. `receipt` is present
+/// whenever an operation identity exists, even for errors.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, PartialEq, Eq)]
+pub struct WriteToolOutput {
+    /// The operation receipt, when one exists.
+    pub receipt: Option<WriteReceipt>,
+    /// Fixed error code when the result is an error.
+    pub error_code: Option<ErrorCode>,
+    /// Fixed message for the code.
+    pub message: Option<String>,
+}
+
+enum Head {
+    Absent,
+    Present {
+        uuid: String,
+        parent: Option<String>,
+        content: String,
+    },
+}
+
+#[derive(Deserialize)]
+struct JsonWiki {
+    #[serde(rename = "resultCode")]
+    result_code: Option<String>,
+    payload: Option<JsonPayload>,
+}
+
+#[derive(Deserialize)]
+struct JsonPayload {
+    uuid: String,
+    parent: Option<String>,
+    content: Option<String>,
+}
+
+struct Inner {
+    binding: RepositoryBinding,
     fossil_bin: PathBuf,
     limits: Limits,
+    sync_limits: Limits,
+    allow_local_writes: bool,
+    allow_repository_sync: bool,
+    journal: Option<Journal>,
+    mutation: Mutex<()>,
+    children: Semaphore,
+}
+
+/// MCP handler for one bound Fossil repository.
+///
+/// Cloning shares the same immutable binding, journal and admission guards.
+#[derive(Clone)]
+pub struct FossilWiki {
+    inner: Arc<Inner>,
     tool_router: ToolRouter<Self>,
+}
+
+fn fail(code: ErrorCode) -> Result<CallToolResult, ErrorData> {
+    let out = WriteToolOutput {
+        receipt: None,
+        error_code: Some(code),
+        message: Some(code.message().into()),
+    };
+    Ok(CallToolResult::structured_error(
+        serde_json::to_value(out).expect("serializable"),
+    ))
+}
+
+fn receipt_result(receipt: WriteReceipt, as_error: bool) -> Result<CallToolResult, ErrorData> {
+    let out = WriteToolOutput {
+        error_code: receipt.error_code,
+        message: receipt.error_code.map(|c| c.message().to_string()),
+        receipt: Some(receipt),
+    };
+    let v = serde_json::to_value(out).expect("serializable");
+    Ok(if as_error {
+        CallToolResult::structured_error(v)
+    } else {
+        CallToolResult::structured(v)
+    })
+}
+
+fn text_error(code: ErrorCode) -> String {
+    let name = serde_json::to_value(code)
+        .ok()
+        .and_then(|v| v.as_str().map(String::from));
+    format!("{}: {}", name.unwrap_or_default(), code.message())
+}
+
+impl FossilWiki {
+    /// Validate the configuration and bind to the repository.
+    ///
+    /// Fails (before any MCP service starts) unless the repository is a
+    /// regular non-empty non-symlink file that `fossil` accepts, and, when
+    /// writes are enabled, the receipt journal can be opened and locked.
+    pub async fn bind(cfg: WikiConfig) -> Result<Self, StartupError> {
+        let binding = RepositoryBinding::check(&cfg)?;
+        let journal = if cfg.allow_local_writes {
+            let dir = cfg
+                .state_dir
+                .as_ref()
+                .ok_or(StartupError::StateDirRequired)?;
+            Some(
+                Journal::open(dir, cfg.journal_cap)
+                    .map_err(|_| StartupError::StateDirUnavailable)?,
+            )
+        } else {
+            None
+        };
+        let mut sync_limits = cfg.limits;
+        sync_limits.deadline = cfg.sync_deadline;
+        let wiki = Self {
+            inner: Arc::new(Inner {
+                binding,
+                fossil_bin: cfg.fossil_bin,
+                limits: cfg.limits,
+                sync_limits,
+                allow_local_writes: cfg.allow_local_writes,
+                allow_repository_sync: cfg.allow_repository_sync,
+                journal,
+                mutation: Mutex::new(()),
+                children: Semaphore::new(MAX_ACTIVE_CHILDREN),
+            }),
+            tool_router: Self::tool_router(),
+        };
+        match wiki
+            .run(
+                &["wiki", "list", "-R", &wiki.repo_arg()],
+                None,
+                wiki.inner.limits,
+            )
+            .await
+        {
+            Ok(o) if o.success() => Ok(wiki),
+            Err(ProcError::Spawn) => Err(StartupError::FossilUnavailable),
+            _ => Err(StartupError::NotAFossilRepository),
+        }
+    }
+
+    /// Alias of the bound repository.
+    pub fn repo_id(&self) -> &str {
+        self.inner.binding.repo_id()
+    }
+
+    fn repo_arg(&self) -> String {
+        self.inner.binding.path.to_string_lossy().into_owned()
+    }
+
+    async fn run(
+        &self,
+        args: &[&str],
+        stdin: Option<&[u8]>,
+        limits: Limits,
+    ) -> Result<ProcOutput, ProcError> {
+        let _permit = self
+            .inner
+            .children
+            .try_acquire()
+            .map_err(|_| ProcError::Io)?;
+        let args: Vec<OsString> = args.iter().map(Into::into).collect();
+        process::run(&self.inner.fossil_bin, &args, stdin, &limits).await
+    }
+
+    /// Read the current head of `page` via `fossil json wiki get`.
+    async fn head(&self, page: &str) -> Result<Head, ErrorCode> {
+        let mut limits = self.inner.limits;
+        limits.stdout_max = limits.stdout_max.saturating_mul(4);
+        let out = self
+            .run(
+                &[
+                    "json",
+                    "wiki",
+                    "get",
+                    "--name",
+                    page,
+                    "-R",
+                    &self.repo_arg(),
+                ],
+                None,
+                limits,
+            )
+            .await
+            .map_err(|e| match e {
+                ProcError::Spawn => ErrorCode::SpawnFailed,
+                ProcError::Timeout => ErrorCode::Timeout,
+                ProcError::OutputLimit => ErrorCode::OutputLimit,
+                ProcError::Io => ErrorCode::PreflightFailed,
+            })?;
+        if !out.success() {
+            return Err(ErrorCode::PreflightFailed);
+        }
+        let parsed: JsonWiki =
+            serde_json::from_slice(&out.stdout).map_err(|_| ErrorCode::BadResponse)?;
+        match (parsed.result_code.as_deref(), parsed.payload) {
+            (Some("FOSSIL-3006"), _) => Ok(Head::Absent),
+            (None, Some(p)) => Ok(Head::Present {
+                uuid: p.uuid,
+                parent: p.parent.filter(|s| !s.is_empty()),
+                content: p.content.unwrap_or_default(),
+            }),
+            _ => Err(ErrorCode::BadResponse),
+        }
+    }
+
+    fn journal(&self) -> Result<&Journal, ErrorCode> {
+        if !self.inner.allow_local_writes {
+            return Err(ErrorCode::WriteDisabled);
+        }
+        self.inner
+            .journal
+            .as_ref()
+            .ok_or(ErrorCode::ReceiptStoreUnavailable)
+    }
+
+    fn persist(&self, id: &str, rec: &Record) -> Result<(), ErrorCode> {
+        self.journal()?
+            .put(id, rec)
+            .map_err(|_| ErrorCode::ReceiptStoreUnavailable)
+    }
+
+    async fn sync(&self) -> PublishOutcome {
+        let repo = self.repo_arg();
+        classify_sync(
+            self.run(&["sync", "-R", &repo], None, self.inner.sync_limits)
+                .await,
+        )
+    }
+
+    /// Execute one reserved write; persists each stage.
+    async fn execute(&self, id: &str, mut rec: Record) -> Result<WriteReceipt, ErrorCode> {
+        let req = rec.request.clone();
+        let mut base = ReceiptBase {
+            repo_id: self.repo_id().to_string(),
+            operation_id: id.to_string(),
+            page_name: req.page_name.clone(),
+            previous_revision: None,
+        };
+        let finish = |this: &Self,
+                      rec: &mut Record,
+                      base: &ReceiptBase,
+                      c: CommitOutcome,
+                      p: Option<&PublishOutcome>| {
+            rec.receipt = build_receipt(base, req.publication, &c, p);
+            this.persist(id, rec).map(|_| rec.receipt.clone())
+        };
+
+        // Read-only pre-flight: observe the head so create/commit is chosen
+        // from data, not from English error text.
+        let head = match self.head(&req.page_name).await {
+            Ok(h) => h,
+            Err(code) => {
+                let code = if code == ErrorCode::Timeout
+                    || code == ErrorCode::OutputLimit
+                    || code == ErrorCode::SpawnFailed
+                {
+                    code
+                } else {
+                    ErrorCode::PreflightFailed
+                };
+                return finish(self, &mut rec, &base, CommitOutcome::NeverRan(code), None);
+            }
+        };
+        let (sub, prev) = match &head {
+            Head::Absent => ("create", None),
+            Head::Present { uuid, .. } => ("commit", Some(uuid.clone())),
+        };
+        base.previous_revision = prev.clone();
+
+        let repo = self.repo_arg();
+        let mimetype = req.mimetype.map(|m| format!("--mimetype={}", m.as_str()));
+        let mut argv = vec!["wiki", sub, req.page_name.as_str(), "-R", repo.as_str()];
+        if let Some(m) = &mimetype {
+            argv.push(m);
+        }
+        let ran = self
+            .run(&argv, Some(req.content.as_bytes()), self.inner.limits)
+            .await;
+        let commit = match ran {
+            Err(ProcError::Spawn) => CommitOutcome::NeverRan(ErrorCode::SpawnFailed),
+            Err(e) => CommitOutcome::Unproven(proc_error_code(e)),
+            Ok(o) if !o.success() => CommitOutcome::Unproven(ErrorCode::CommitUnconfirmed),
+            Ok(_) => {
+                let revision = match self.head(&req.page_name).await {
+                    Ok(Head::Present { uuid, parent, .. })
+                        if prev.as_deref() != Some(uuid.as_str()) && parent == prev =>
+                    {
+                        Some(uuid)
+                    }
+                    _ => None,
+                };
+                CommitOutcome::Committed { revision }
+            }
+        };
+        let CommitOutcome::Committed { revision: Some(_) } = &commit else {
+            return finish(self, &mut rec, &base, commit, None);
+        };
+        if req.publication == Publication::LocalOnly {
+            return finish(self, &mut rec, &base, commit, None);
+        }
+
+        // Record "publication unknown" *before* sync starts: a crash or lost
+        // reply after this point must never read as "not published".
+        let started = PublishOutcome::Unknown(ErrorCode::PublicationUnconfirmed);
+        finish(self, &mut rec, &base, commit.clone(), Some(&started))?;
+        let published = self.sync().await;
+        finish(self, &mut rec, &base, commit, Some(&published))
+    }
 }
 
 #[tool_router]
 impl FossilWiki {
-    /// Creates a new `FossilWiki` handler.
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - Optional path to the Fossil repository file. If None, use
-    ///            the configure_repository tool to set it at runtime.
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use fossil_mcp::FossilWiki;
-    /// use std::path::PathBuf;
-    ///
-    /// // With repository
-    /// let wiki = FossilWiki::new(Some(PathBuf::from("/tmp/test.fossil")));
-    ///
-    /// // Without repository (configure later)
-    /// let wiki = FossilWiki::new(None);
-    /// ```
-    pub fn new(path: Option<PathBuf>) -> Self {
-        Self {
-            repository: Arc::new(RwLock::new(path)),
-            fossil_bin: PathBuf::from("fossil"),
-            limits: Limits::default(),
-            tool_router: Self::tool_router(),
+    /// Lists all wiki pages in the bound repository.
+    #[tool(description = "List all wiki pages in the bound Fossil repository")]
+    pub async fn list_wiki_pages(&self) -> Result<Json<types::ListWikiPagesResponse>, String> {
+        let out = self
+            .run(
+                &["wiki", "list", "-R", &self.repo_arg()],
+                None,
+                self.inner.limits,
+            )
+            .await
+            .map_err(|e| text_error(proc_error_code(e)))?;
+        if !out.success() {
+            return Err(text_error(ErrorCode::BadResponse));
         }
-    }
-
-    /// Use a specific `fossil` executable (operator configuration and test seam).
-    pub fn with_fossil_bin(mut self, bin: impl Into<PathBuf>) -> Self {
-        self.fossil_bin = bin.into();
-        self
-    }
-
-    /// Override subprocess budgets.
-    pub fn with_limits(mut self, limits: Limits) -> Self {
-        self.limits = limits;
-        self
-    }
-
-    /// Run the configured `fossil` with the bounded subprocess runner.
-    async fn fossil(
-        &self,
-        args: &[&str],
-        stdin: Option<&[u8]>,
-    ) -> Result<process::ProcOutput, process::ProcError> {
-        let args: Vec<std::ffi::OsString> = args.iter().map(Into::into).collect();
-        process::run(&self.fossil_bin, &args, stdin, &self.limits).await
-    }
-
-    /// Get the current repository path.
-    ///
-    /// # Returns
-    ///
-    /// The repository path if configured
-    ///
-    /// # Errors
-    ///
-    /// Returns a helpful error message if no repository is configured
-    fn get_repository(&self) -> Result<PathBuf, String> {
-        let repo = self.repository.read().unwrap();
-        repo.as_ref()
-            .cloned()
-            .ok_or_else(|| {
-                "No repository configured. Please configure a repository using one of these methods:\n\
-                1. Use the configure_repository tool: {\"repo_path\": \"/path/to/repo.fossil\"}\n\
-                2. Restart with -R flag: fossil-mcp -R /path/to/repo.fossil\n\
-                3. Set environment variable: FOSSIL_REPO=/path/to/repo.fossil".to_string()
-            })
-    }
-
-    /// Configure the repository path at runtime.
-    ///
-    /// This tool allows setting the repository path after the MCP server has started,
-    /// enabling flexible deployment scenarios where the repository location may not
-    /// be known at startup time.
-    ///
-    /// # MCP Tool
-    ///
-    /// This is exposed as the `configure_repository` MCP tool.
-    ///
-    /// **Arguments**:
-    /// ```json
-    /// {
-    ///   "repo_path": "/path/to/repo.fossil"
-    /// }
-    /// ```
-    ///
-    /// **Returns**:
-    /// ```json
-    /// {
-    ///   "success": true,
-    ///   "message": "Repository configured: \"/path/to/repo.fossil\""
-    /// }
-    /// ```
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - The repository file doesn't exist
-    /// - The path is invalid
-    ///
-    /// # Example
-    ///
-    /// ```rust,no_run
-    /// use fossil_mcp::{FossilWiki, ConfigureRepositoryArgs};
-    /// use rmcp::handler::server::wrapper::Parameters;
-    ///
-    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// let wiki = FossilWiki::new(None);
-    ///
-    /// let args = Parameters(ConfigureRepositoryArgs {
-    ///     repo_path: "/path/to/repo.fossil".to_string(),
-    /// });
-    ///
-    /// let response = wiki.configure_repository(args).await?;
-    /// println!("Success: {}", response.0.success);
-    /// # Ok(())
-    /// # }
-    /// ```
-    #[tool(description = "Connect to a local Fossil repository by specifying its file path")]
-    pub async fn configure_repository(
-        &self,
-        args: Parameters<ConfigureRepositoryArgs>,
-    ) -> Result<Json<types::ConfigureRepositoryResponse>, String> {
-        let path = PathBuf::from(&args.0.repo_path);
-
-        // Validate that the repository file exists
-        if !path.exists() {
-            return Err(format!("Repository file does not exist: {:?}", path));
-        }
-
-        // Validate it's a file, not a directory
-        if !path.is_file() {
-            return Err(format!("Repository path is not a file: {:?}", path));
-        }
-
-        // Update repository
-        let mut repo = self.repository.write().unwrap();
-        *repo = Some(path.clone());
-
-        tracing::info!("Repository configured: {:?}", path);
-
-        Ok(Json(types::ConfigureRepositoryResponse {
-            success: true,
-            message: format!("Repository configured: {:?}", path),
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        Ok(Json(types::ListWikiPagesResponse {
+            pages: parse_wiki_list(&stdout),
         }))
     }
 
-    /// Lists all wiki pages in the Fossil repository.
-    ///
-    /// Executes `fossil wiki -R <repo> list` and returns the page names.
-    ///
-    /// # MCP Tool
-    ///
-    /// This is exposed as the `list_wiki_pages` MCP tool.
-    ///
-    /// **Arguments**: None
-    ///
-    /// **Returns**: `{"pages": ["HomePage", "About", "Docs/API"]}`
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - The `fossil` command fails to execute
-    /// - The repository file doesn't exist or is invalid
-    ///
-    /// # Example
-    ///
-    /// ```rust,no_run
-    /// use fossil_mcp::FossilWiki;
-    /// use std::path::PathBuf;
-    ///
-    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// let wiki = FossilWiki::new(Some(PathBuf::from("/path/to/repo.fossil")));
-    /// let response = wiki.list_wiki_pages().await?;
-    ///
-    /// for page in &response.0.pages {
-    ///     println!("Page: {}", page);
-    /// }
-    /// # Ok(())
-    /// # }
-    /// ```
-    #[tool(description = "List all wiki pages in the Fossil repository")]
-    pub async fn list_wiki_pages(&self) -> Result<Json<types::ListWikiPagesResponse>, String> {
-        let repo_path = self.get_repository()?;
-
-        let output = self
-            .fossil(&["wiki", "-R", &repo_path.to_string_lossy(), "list"], None)
-            .await
-            .map_err(|e| format!("fossil wiki list failed: {e:?}"))?;
-        if !output.success() {
-            return Err("fossil wiki list failed".to_string());
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let pages = parse_wiki_list(&stdout);
-
-        Ok(Json(types::ListWikiPagesResponse { pages }))
-    }
-
-    /// Reads the content of a specific wiki page.
-    ///
-    /// Executes `fossil wiki -R <repo> export <page_name>` to retrieve the page content.
-    ///
-    /// # MCP Tool
-    ///
-    /// This is exposed as the `read_wiki_page` MCP tool.
-    ///
-    /// **Arguments**:
-    /// ```json
-    /// {
-    ///   "page_name": "HomePage"
-    /// }
-    /// ```
-    ///
-    /// **Returns**:
-    /// ```json
-    /// {
-    ///   "page_name": "HomePage",
-    ///   "content": "# Welcome\n\nWelcome to the wiki!"
-    /// }
-    /// ```
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - The page doesn't exist
-    /// - The `fossil` command fails
-    /// - The repository is invalid
-    ///
-    /// # Example
-    ///
-    /// ```rust,no_run
-    /// use fossil_mcp::{FossilWiki, ReadWikiPageArgs};
-    /// use rmcp::handler::server::wrapper::Parameters;
-    /// use std::path::PathBuf;
-    ///
-    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// let wiki = FossilWiki::new(Some(PathBuf::from("/path/to/repo.fossil")));
-    ///
-    /// let args = Parameters(ReadWikiPageArgs {
-    ///     page_name: "HomePage".to_string(),
-    /// });
-    ///
-    /// let response = wiki.read_wiki_page(args).await?;
-    /// println!("Content: {}", response.0.content);
-    /// # Ok(())
-    /// # }
-    /// ```
-    #[tool(description = "Read the content of a wiki page")]
+    /// Reads the exact content and current revision of a page.
+    #[tool(description = "Read the content and current revision of a wiki page")]
     pub async fn read_wiki_page(
         &self,
         args: Parameters<ReadWikiPageArgs>,
     ) -> Result<Json<types::ReadWikiPageResponse>, String> {
-        let repo_path = self.get_repository()?;
-
-        let output = self
-            .fossil(&["wiki", "-R", &repo_path.to_string_lossy(), "export", &args.0.page_name], None)
-            .await
-            .map_err(|e| format!("fossil wiki export failed: {e:?}"))?;
-        if !output.success() {
-            return Err("fossil wiki export failed".to_string());
+        if !valid_page_name(&args.0.page_name) {
+            return Err(text_error(ErrorCode::InvalidArgument));
         }
-
-        let content = String::from_utf8_lossy(&output.stdout);
-        let content = content.trim_end_matches('\n').to_string();
-
-        Ok(Json(types::ReadWikiPageResponse {
-            page_name: args.0.page_name,
-            content,
-        }))
+        match self.head(&args.0.page_name).await.map_err(text_error)? {
+            Head::Absent => Err(text_error(ErrorCode::PageNotFound)),
+            Head::Present { uuid, content, .. } => {
+                if content.len() > MAX_CONTENT_BYTES {
+                    return Err(text_error(ErrorCode::BadResponse));
+                }
+                Ok(Json(types::ReadWikiPageResponse {
+                    page_name: args.0.page_name,
+                    content,
+                    revision: uuid,
+                }))
+            }
+        }
     }
 
-    /// Create or update a wiki page in the repository.
+    /// Creates or updates a page and returns a typed receipt.
     ///
-    /// # Behavior
-    /// 1. Writes the provided content to the wiki page
-    /// 2. If `skip_sync` is false, attempts to synchronize with the remote repository
-    /// 3. Reports page write success and synchronization status in the response
-    ///
-    /// # Parameters
-    /// - `page_name`: Name of the page (e.g., "HomePage", "Docs/API")
-    /// - `content`: The page content to write
-    /// - `mimetype`: Optional MIME type (e.g., "text/x-markdown")
-    /// - `skip_sync`: If true, skip repository synchronization (default: false)
-    /// - `force_write`: If true, allow success even with blocking sync errors (default: false)
-    ///
-    /// # Return Values
-    /// - Always returns `Ok` if the page write succeeds (regardless of sync outcome)
-    /// - Returns `Err` only if the page write fails or sync fails with a blocking error and `force_write` is false
-    ///
-    /// # Errors
-    /// - Page write fails (insufficient permissions, file system errors)
-    /// - Sync fails with a merge conflict AND `force_write` is false
-    ///
-    /// # Sync Failures (Non-blocking)
-    /// These are reported in the response but do not cause the operation to fail:
-    /// - No remote repository configured
-    /// - Network connectivity issues
-    ///
-    /// # Example Usage
-    /// ```no_run
-    /// # use fossil_mcp::{FossilWiki, WriteWikiPageArgs};
-    /// # use rmcp::handler::server::wrapper::Parameters;
-    /// # use std::path::PathBuf;
-    /// # #[tokio::main]
-    /// # async fn main() {
-    /// let wiki = FossilWiki::new(Some(PathBuf::from("/path/to/repo.fossil")));
-    /// let args = Parameters(WriteWikiPageArgs {
-    ///     page_name: "HomePage".to_string(),
-    ///     content: "Welcome to the wiki".to_string(),
-    ///     mimetype: Some("text/x-fossil-wiki".to_string()),
-    ///     skip_sync: false,
-    ///     force_write: false,
-    /// });
-    /// match wiki.write_wiki_page(args).await {
-    ///     Ok(response) => println!("Page written: {}", response.0.success),
-    ///     Err(e) => eprintln!("Error: {}", e),
-    /// }
-    /// # }
-    /// ```
-    #[tool(description = "Create or update a wiki page")]
+    /// The receipt separates the local commit (`commit_state`) from
+    /// publication (`publication_state`); `unknown` is never reported as
+    /// failure. Repeating an `operation_id` with the same request replays the
+    /// stored receipt and never commits twice. There is no lost-update
+    /// protection yet: `previous_revision` is observed, not enforced.
+    #[tool(
+        description = "Create or update a wiki page; returns a typed receipt (commit_state, publication_state, revision)",
+        output_schema = rmcp::handler::server::common::schema_for_type::<WriteToolOutput>()
+    )]
     pub async fn write_wiki_page(
         &self,
         args: Parameters<WriteWikiPageArgs>,
-    ) -> Result<Json<types::WriteWikiPageResponse>, String> {
-        let repo_path = self.get_repository()?;
-
-        // Page bytes travel over stdin; no content file ever exists.
-        let repo = repo_path.to_string_lossy().into_owned();
-        let mimetype = args.0.mimetype.as_ref().map(|mt| format!("--mimetype={mt}"));
-        let build = |sub: &'static str| {
-            let mut v = vec!["wiki".to_string(), sub.to_string(), args.0.page_name.clone(), "-R".to_string(), repo.clone()];
-            v.extend(mimetype.clone());
-            v
-        };
-        let this = self;
-        let payload = args.0.content.as_bytes();
-        let run = |v: Vec<String>| async move {
-            let refs: Vec<&str> = v.iter().map(String::as_str).collect();
-            this.fossil(&refs, Some(payload)).await
-        };
-
-        // Try "create" first, then "commit" for existing pages (fresh pipe each time).
-        let mut final_output = run(build("create"))
-            .await
-            .map_err(|e| format!("fossil wiki create failed: {e:?}"))?;
-        if !final_output.success() {
-            let stderr_str = String::from_utf8_lossy(&final_output.stderr).into_owned();
-            if stderr_str.contains("already exists") {
-                final_output = run(build("commit"))
-                    .await
-                    .map_err(|e| format!("fossil wiki commit failed: {e:?}"))?;
-            }
+    ) -> Result<CallToolResult, ErrorData> {
+        if !self.inner.allow_local_writes {
+            return fail(ErrorCode::WriteDisabled);
         }
-
-        if !final_output.success() {
-            return Err("fossil wiki operation failed".to_string());
+        let req = match validate_write(&args.0) {
+            Ok(r) => r,
+            Err(c) => return fail(c),
+        };
+        if req.publication == Publication::SyncRepository && !self.inner.allow_repository_sync {
+            return fail(ErrorCode::PublicationDenied);
         }
-
-        // Handle synchronization if requested
-        let mut sync_status = None;
-        if !args.0.skip_sync {
-            match sync_repository(&self.fossil_bin, &repo_path, &self.limits).await {
-                Ok(()) => {
-                    sync_status = Some(types::SyncStatus {
-                        attempted: true,
-                        succeeded: true,
-                        error_type: None,
-                        error_message: None,
-                        can_force_write: false,
-                    });
+        let Ok(_guard) = self.inner.mutation.try_lock() else {
+            return fail(ErrorCode::Busy);
+        };
+        let id = args.0.operation_id.as_str();
+        let journal = match self.journal() {
+            Ok(j) => j,
+            Err(c) => return fail(c),
+        };
+        match journal.get(id) {
+            Err(_) => return fail(ErrorCode::ReceiptStoreUnavailable),
+            Ok(Some(rec)) => {
+                if rec.request != req || rec.repo_id != self.repo_id() {
+                    return fail(ErrorCode::IdempotencyConflict);
                 }
-                Err(sync_error) => {
-                    // Determine if error is blocking or non-blocking
-                    let (error_type, can_force_write) = match &sync_error {
-                        SyncError::MergeConflict => ("MergeConflict".to_string(), true),
-                        SyncError::NoRemoteConfigured => ("NoRemoteConfigured".to_string(), false),
-                        SyncError::NetworkError => ("NetworkError".to_string(), false),
-                        SyncError::Other(_) => ("Other".to_string(), false),
-                    };
-
-                    let error_message = match sync_error {
-                        SyncError::MergeConflict => "Merge conflict occurred during synchronization. Use force_write to override.".to_string(),
-                        SyncError::NoRemoteConfigured => "No remote URL configured for this repository.".to_string(),
-                        SyncError::NetworkError => "Network error occurred during synchronization. Please try again later.".to_string(),
-                        SyncError::Other(msg) => format!("Synchronization error: {}", msg),
-                    };
-
-                    sync_status = Some(types::SyncStatus {
-                        attempted: true,
-                        succeeded: false,
-                        error_type: Some(error_type.clone()),
-                        error_message: Some(error_message.clone()),
-                        can_force_write,
-                    });
-
-                    // If it's a blocking error (merge conflict) and force_write is not set, fail
-                    if can_force_write && !args.0.force_write {
-                        return Err(format!("Sync failed: {}. Use force_write flag to override.", error_message));
-                    }
+                let retryable = rec.receipt.commit_state == types::CommitState::NotCommitted
+                    && rec.receipt.retry_action == types::RetryAction::RetrySameOperation;
+                if !retryable {
+                    let ok = rec.receipt.is_success();
+                    return receipt_result(rec.receipt, !ok);
                 }
             }
+            Ok(None) => {}
         }
-
-        Ok(Json(types::WriteWikiPageResponse {
-            success: true,
-            page_name: args.0.page_name,
-            message: "Wiki page written successfully".to_string(),
-            sync_status,
-        }))
+        // Reserve (commit already "unknown") before any child can run.
+        let rec = Record::reservation(self.repo_id(), id, req);
+        if let Err(c) = self.persist(id, &rec) {
+            return fail(c);
+        }
+        match self.execute(id, rec).await {
+            Ok(receipt) => {
+                let ok = receipt.is_success();
+                receipt_result(receipt, !ok)
+            }
+            Err(c) => fail(c),
+        }
     }
 
-    /// Authenticate with wiki_searcher API and get session token.
-    ///
-    /// This tool authenticates a user against the Fossil database via the
-    /// wiki_searcher API and returns a session token that can be used for
-    /// subsequent search_wiki calls.
-    ///
-    /// # MCP Tool
-    ///
-    /// This is exposed as the `authenticate_wiki` MCP tool.
-    ///
-    /// **Arguments**:
-    /// ```json
-    /// {
-    ///   "username": "myuser",
-    ///   "password": "mypass"
-    /// }
-    /// ```
-    ///
-    /// **Returns**:
-    /// ```json
-    /// {
-    ///   "success": true,
-    ///   "session_token": "abc123...",
-    ///   "message": "Authentication successful"
-    /// }
-    /// ```
-    ///
-    /// # Environment Variables
-    ///
-    /// - `WIKI_SEARCHER_URL`: Base URL of wiki_searcher API (default: http://localhost:8090)
-    ///
-    /// # Example
-    ///
-    /// ```rust,no_run
-    /// use fossil_mcp::{FossilWiki, AuthenticateWikiArgs};
-    /// use rmcp::handler::server::wrapper::Parameters;
-    ///
-    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// let wiki = FossilWiki::new(Some(std::path::PathBuf::from("/path/to/repo.fossil")));
-    ///
-    /// let args = Parameters(AuthenticateWikiArgs {
-    ///     username: "myuser".to_string(),
-    ///     password: "mypass".to_string(),
-    /// });
-    ///
-    /// let response = wiki.authenticate_wiki(args).await?;
-    /// if response.0.success {
-    ///     println!("Token: {}", response.0.session_token.unwrap());
-    /// }
-    /// # Ok(())
-    /// # }
-    /// ```
-    #[tool(description = "Authenticate with wiki_searcher and get session token")]
-    pub async fn authenticate_wiki(
+    /// Returns the stored receipt of an earlier write. Read-only.
+    #[tool(
+        description = "Return the stored receipt of an earlier write_wiki_page operation",
+        output_schema = rmcp::handler::server::common::schema_for_type::<WriteToolOutput>()
+    )]
+    pub async fn wiki_operation_status(
         &self,
-        args: Parameters<AuthenticateWikiArgs>,
-    ) -> Result<Json<types::AuthenticateWikiResponse>, String> {
-        // Get wiki_searcher URL from environment or use default
-        let searcher_url = std::env::var("WIKI_SEARCHER_URL")
-            .unwrap_or_else(|_| "http://localhost:8090".to_string());
-
-        // Build HTTP client
-        let client = reqwest::Client::new();
-
-        // Make POST request to authenticate endpoint
-        let response = client
-            .post(format!("{}/v1/authenticate", searcher_url))
-            .json(&serde_json::json!({
-                "username": args.0.username,
-                "password": args.0.password
-            }))
-            .send()
-            .await
-            .map_err(|e| format!("Failed to connect to wiki_searcher: {}", e))?;
-
-        // Parse response (don't check status - endpoint returns 200 with success flag)
-        let body: serde_json::Value = response.json().await
-            .map_err(|e| format!("Failed to parse authentication response: {}", e))?;
-
-        // Extract fields
-        let success = body.get("success")
-            .and_then(|s| s.as_bool())
-            .unwrap_or(false);
-
-        let session_token = body.get("session_token")
-            .and_then(|t| t.as_str())
-            .map(String::from);
-
-        let message = body.get("message")
-            .and_then(|m| m.as_str())
-            .unwrap_or("Unknown error")
-            .to_string();
-
-        if success {
-            tracing::info!("User '{}' authenticated successfully", args.0.username);
-        } else {
-            tracing::warn!("Authentication failed for user '{}'", args.0.username);
+        args: Parameters<OperationStatusArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let journal = match self.journal() {
+            Ok(j) => j,
+            Err(c) => return fail(c),
+        };
+        match journal.get(&args.0.operation_id) {
+            Ok(Some(rec)) if rec.repo_id == self.repo_id() => receipt_result(rec.receipt, false),
+            Ok(_) | Err(JournalError::BadKey) => fail(ErrorCode::UnknownOperation),
+            Err(_) => fail(ErrorCode::ReceiptStoreUnavailable),
         }
-
-        Ok(Json(types::AuthenticateWikiResponse {
-            success,
-            session_token,
-            message,
-        }))
     }
 
-    /// Search wiki pages using semantic search API.
-    ///
-    /// This tool calls the wiki_searcher HTTP API to perform semantic search
-    /// across indexed wiki pages. The wiki_searcher service must be running
-    /// and accessible at the configured URL.
-    ///
-    /// Authentication can be provided via either api_key or session_token
-    /// (obtained from authenticate_wiki tool).
-    ///
-    /// # MCP Tool
-    ///
-    /// This is exposed as the `search_wiki` MCP tool.
-    ///
-    /// **Arguments with API key**:
-    /// ```json
-    /// {
-    ///   "query": "embedding concepts",
-    ///   "limit": 10,
-    ///   "threshold": 0.7,
-    ///   "api_key": "your-api-key-here"
-    /// }
-    /// ```
-    ///
-    /// **Arguments with session token**:
-    /// ```json
-    /// {
-    ///   "query": "embedding concepts",
-    ///   "limit": 10,
-    ///   "threshold": 0.7,
-    ///   "session_token": "token-from-authenticate"
-    /// }
-    /// ```
-    ///
-    /// **Returns**:
-    /// ```json
-    /// {
-    ///   "results": [
-    ///     {
-    ///       "page_name": "Machine Learning",
-    ///       "chunk_text": "Embeddings are dense vector representations...",
-    ///       "section_header": "Introduction",
-    ///       "relevance_score": 0.843,
-    ///       "chunk_index": 0
-    ///     }
-    ///   ]
-    /// }
-    /// ```
-    ///
-    /// # Environment Variables
-    ///
-    /// - `WIKI_SEARCHER_URL`: Base URL of wiki_searcher API (default: http://localhost:8090)
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - wiki_searcher is not running or unreachable
-    /// - API key is invalid
-    /// - Search request fails
-    ///
-    /// # Example
-    ///
-    /// ```rust,no_run
-    /// use fossil_mcp::{FossilWiki, SearchWikiArgs};
-    /// use rmcp::handler::server::wrapper::Parameters;
-    ///
-    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// let wiki = FossilWiki::new(Some(std::path::PathBuf::from("/path/to/repo.fossil")));
-    ///
-    /// let args = Parameters(SearchWikiArgs {
-    ///     query: "embedding concepts".to_string(),
-    ///     limit: 10,
-    ///     threshold: 0.7,
-    ///     api_key: Some("secret-key".to_string()),
-    ///     session_token: None,
-    /// });
-    ///
-    /// let response = wiki.search_wiki(args).await?;
-    /// println!("Found {} results", response.0.results.len());
-    /// # Ok(())
-    /// # }
-    /// ```
-    #[tool(description = "Search wiki pages using semantic search")]
-    pub async fn search_wiki(
+    /// Inspects an operation; with `retry_publication`, re-runs only the sync
+    /// of an already committed revision. Never creates a wiki artifact.
+    #[tool(
+        description = "Reconcile an earlier write: report its receipt, optionally retrying only the sync of a committed revision",
+        output_schema = rmcp::handler::server::common::schema_for_type::<WriteToolOutput>()
+    )]
+    pub async fn wiki_reconcile_operation(
         &self,
-        args: Parameters<SearchWikiArgs>,
-    ) -> Result<Json<types::SearchWikiResponse>, String> {
-        // Validate authentication provided
-        if args.0.api_key.is_none() && args.0.session_token.is_none() {
-            return Err("Either api_key or session_token must be provided".to_string());
+        args: Parameters<ReconcileOperationArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let journal = match self.journal() {
+            Ok(j) => j,
+            Err(c) => return fail(c),
+        };
+        let id = args.0.operation_id.as_str();
+        let rec = match journal.get(id) {
+            Ok(Some(r)) if r.repo_id == self.repo_id() => r,
+            Ok(_) | Err(JournalError::BadKey) => return fail(ErrorCode::UnknownOperation),
+            Err(_) => return fail(ErrorCode::ReceiptStoreUnavailable),
+        };
+        if !args.0.retry_publication {
+            return receipt_result(rec.receipt, false);
         }
-
-        // Get wiki_searcher URL from environment or use default
-        let searcher_url = std::env::var("WIKI_SEARCHER_URL")
-            .unwrap_or_else(|_| "http://localhost:8090".to_string());
-
-        // Build HTTP client
-        let client = reqwest::Client::new();
-
-        // Build request with appropriate authentication
-        let mut request_builder = client
-            .post(format!("{}/v1/search", searcher_url));
-
-        // Add authentication header or cookie
-        if let Some(api_key) = &args.0.api_key {
-            request_builder = request_builder.header("X-API-Key", api_key);
-        } else if let Some(session_token) = &args.0.session_token {
-            request_builder = request_builder.header("Cookie", format!("session={}", session_token));
+        if !self.inner.allow_repository_sync {
+            return fail(ErrorCode::PublicationDenied);
         }
-
-        // Make POST request to wiki_searcher API
-        let response = request_builder
-            .json(&serde_json::json!({
-                "query": args.0.query,
-                "limit": args.0.limit,
-                "threshold": args.0.threshold
-            }))
-            .send()
-            .await
-            .map_err(|e| format!("Failed to connect to wiki_searcher: {}", e))?;
-
-        // Check response status
-        if !response.status().is_success() {
-            let status = response.status();
-            let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
-            return Err(format!("Search failed with status {}: {}", status, error_text));
+        let eligible = rec.receipt.commit_state == types::CommitState::Committed
+            && rec.receipt.revision.is_some()
+            && rec.request.publication == Publication::SyncRepository
+            && matches!(
+                rec.receipt.publication_state,
+                types::PublicationState::Pending | types::PublicationState::Unknown
+            );
+        if !eligible {
+            return fail(ErrorCode::InvalidArgument);
         }
-
-        // Parse response JSON
-        let body: serde_json::Value = response.json().await
-            .map_err(|e| format!("Failed to parse search response: {}", e))?;
-
-        // Extract results array
-        let results_array = body.get("results")
-            .and_then(|r| r.as_array())
-            .ok_or_else(|| "Invalid response format: missing 'results' array".to_string())?;
-
-        // Parse each result
-        let results: Vec<types::SearchResult> = results_array
-            .iter()
-            .filter_map(|r| {
-                Some(types::SearchResult {
-                    page_name: r.get("page_name")?.as_str()?.to_string(),
-                    chunk_text: r.get("chunk_text")?.as_str()?.to_string(),
-                    section_header: r.get("section_header").and_then(|s| s.as_str()).map(String::from),
-                    relevance_score: r.get("relevance_score")?.as_f64()? as f32,
-                    chunk_index: r.get("chunk_index")?.as_u64()? as usize,
-                })
-            })
-            .collect();
-
-        tracing::info!("Search for '{}' returned {} results", args.0.query, results.len());
-
-        Ok(Json(types::SearchWikiResponse { results }))
+        let Ok(_guard) = self.inner.mutation.try_lock() else {
+            return fail(ErrorCode::Busy);
+        };
+        let mut rec = rec;
+        let base = ReceiptBase {
+            repo_id: rec.receipt.repo_id.clone(),
+            operation_id: id.to_string(),
+            page_name: rec.receipt.page_name.clone(),
+            previous_revision: rec.receipt.previous_revision.clone(),
+        };
+        let commit = CommitOutcome::Committed {
+            revision: rec.receipt.revision.clone(),
+        };
+        let started = PublishOutcome::Unknown(ErrorCode::PublicationUnconfirmed);
+        rec.receipt = build_receipt(&base, Publication::SyncRepository, &commit, Some(&started));
+        if let Err(c) = self.persist(id, &rec) {
+            return fail(c);
+        }
+        let published = self.sync().await;
+        rec.receipt = build_receipt(
+            &base,
+            Publication::SyncRepository,
+            &commit,
+            Some(&published),
+        );
+        if let Err(c) = self.persist(id, &rec) {
+            return fail(c);
+        }
+        let ok = rec.receipt.is_success();
+        receipt_result(rec.receipt, !ok)
     }
 }
 
@@ -798,7 +607,7 @@ impl ServerHandler for FossilWiki {
             protocol_version: Default::default(),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             server_info: Default::default(),
-            instructions: Some("MCP server for accessing Fossil SCM wiki pages".to_string()),
+            instructions: Some("MCP server bound to one Fossil wiki repository".to_string()),
         }
     }
 
@@ -806,19 +615,9 @@ impl ServerHandler for FossilWiki {
         &self,
         _request: Option<rmcp::model::PaginatedRequestParams>,
         _context: rmcp::service::RequestContext<rmcp::RoleServer>,
-    ) -> Result<rmcp::model::ListToolsResult, rmcp::ErrorData> {
-        let has_repo = self.repository.read().unwrap().is_some();
-        let tools = if has_repo {
-            self.tool_router.list_all()
-        } else {
-            self.tool_router
-                .list_all()
-                .into_iter()
-                .filter(|t| t.name == "configure_repository")
-                .collect()
-        };
+    ) -> Result<rmcp::model::ListToolsResult, ErrorData> {
         Ok(rmcp::model::ListToolsResult {
-            tools,
+            tools: self.tool_router.list_all(),
             meta: None,
             next_cursor: None,
         })
@@ -828,7 +627,7 @@ impl ServerHandler for FossilWiki {
         &self,
         request: rmcp::model::CallToolRequestParams,
         context: rmcp::service::RequestContext<rmcp::RoleServer>,
-    ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+    ) -> Result<CallToolResult, ErrorData> {
         let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
         self.tool_router.call(tcc).await
     }
@@ -844,108 +643,23 @@ mod tests {
 
     #[test]
     fn test_parse_wiki_list_empty() {
-        let output = "";
-        let pages = parse_wiki_list(output);
-        assert_eq!(pages, Vec::<String>::new());
+        assert_eq!(parse_wiki_list(""), Vec::<String>::new());
     }
 
     #[test]
-    fn test_parse_wiki_list_single_page() {
-        let output = "HomePage";
-        let pages = parse_wiki_list(output);
-        assert_eq!(pages, vec!["HomePage"]);
+    fn test_parse_wiki_list_whitespace_and_blank_lines() {
+        let pages = parse_wiki_list("  HomePage  \n\nAbout\n\n\nDocs/API\n");
+        assert_eq!(pages, vec!["HomePage", "About", "Docs/API"]);
     }
 
     #[test]
-    fn test_parse_wiki_list_multiple_pages() {
-        let output = "HomePage\nAbout\nDocumentation";
-        let pages = parse_wiki_list(output);
-        assert_eq!(pages, vec!["HomePage", "About", "Documentation"]);
-    }
-
-    #[test]
-    fn test_parse_wiki_list_with_whitespace() {
-        let output = "  HomePage  \n  About  \n  Documentation  ";
-        let pages = parse_wiki_list(output);
-        assert_eq!(pages, vec!["HomePage", "About", "Documentation"]);
-    }
-
-    #[test]
-    fn test_parse_wiki_list_with_empty_lines() {
-        let output = "HomePage\n\nAbout\n\n\nDocumentation\n";
-        let pages = parse_wiki_list(output);
-        assert_eq!(pages, vec!["HomePage", "About", "Documentation"]);
-    }
-
-    #[test]
-    fn test_parse_wiki_list_with_special_characters() {
-        let output = "HomePage\nAbout-Us\nUser_Guide\nFAQ";
-        let pages = parse_wiki_list(output);
-        assert_eq!(pages, vec!["HomePage", "About-Us", "User_Guide", "FAQ"]);
-    }
-
-    #[test]
-    fn test_parse_wiki_list_with_slashes() {
-        let output = "HomePage\nDocs/API\nDocs/CLI\nDocs/Web-UI";
-        let pages = parse_wiki_list(output);
-        assert_eq!(pages, vec!["HomePage", "Docs/API", "Docs/CLI", "Docs/Web-UI"]);
-    }
-
-    #[test]
-    fn test_fossil_wiki_creation_with_repo() {
-        let wiki = FossilWiki::new(Some(std::path::PathBuf::from("/tmp/test.fossil")));
-        assert!(wiki.get_repository().is_ok());
-    }
-
-    #[test]
-    fn test_fossil_wiki_creation_without_repo() {
-        let wiki = FossilWiki::new(None);
-        assert!(wiki.get_repository().is_err());
-    }
-
-    #[test]
-    fn test_sync_error_no_remote_configured() {
-        let error = SyncError::NoRemoteConfigured;
-        assert_eq!(error, SyncError::NoRemoteConfigured);
-    }
-
-    #[test]
-    fn test_sync_error_merge_conflict() {
-        let error = SyncError::MergeConflict;
-        assert_eq!(error, SyncError::MergeConflict);
-    }
-
-    #[test]
-    fn test_sync_error_network_error() {
-        let error = SyncError::NetworkError;
-        assert_eq!(error, SyncError::NetworkError);
-    }
-
-    #[test]
-    fn test_sync_error_other() {
-        let msg = "Custom error".to_string();
-        let error = SyncError::Other(msg.clone());
-        assert_eq!(error, SyncError::Other(msg));
-    }
-
-    #[test]
-    fn test_sync_error_is_blocking_merge_conflict() {
-        let error = SyncError::MergeConflict;
-        // Merge conflicts should be considered blocking
-        assert_eq!(error, SyncError::MergeConflict);
-    }
-
-    #[test]
-    fn test_sync_error_is_non_blocking_no_remote() {
-        let error = SyncError::NoRemoteConfigured;
-        // No remote should be considered non-blocking
-        assert_eq!(error, SyncError::NoRemoteConfigured);
-    }
-
-    #[test]
-    fn test_sync_error_is_non_blocking_network() {
-        let error = SyncError::NetworkError;
-        // Network errors should be considered non-blocking
-        assert_eq!(error, SyncError::NetworkError);
+    fn page_name_rules() {
+        assert!(valid_page_name("Docs/API v2"));
+        assert!(!valid_page_name(""));
+        assert!(!valid_page_name("-R"));
+        assert!(!valid_page_name("a\0b"));
+        assert!(!valid_page_name("a\nb"));
+        assert!(!valid_page_name(&"x".repeat(257)));
+        assert!(valid_page_name(&"x".repeat(256)));
     }
 }
