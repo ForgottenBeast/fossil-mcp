@@ -40,7 +40,7 @@ pub mod process;
 pub mod types;
 
 use binding::{RepositoryBinding, StartupError, WikiConfig};
-use operations::{Journal, JournalError, Record, StoredRequest, valid_operation_id};
+use operations::{Journal, JournalError, Record, RepoIdentity, StoredRequest, valid_operation_id};
 use outcome::{
     CommitOutcome, PublishOutcome, ReceiptBase, build_receipt, classify_sync, proc_error_code,
 };
@@ -139,6 +139,8 @@ struct Inner {
     allow_local_writes: bool,
     allow_repository_sync: bool,
     journal: Option<Journal>,
+    /// Identity of the bound repository; present when writes are enabled.
+    identity: Option<RepoIdentity>,
     mutation: Mutex<()>,
     children: Semaphore,
 }
@@ -206,7 +208,7 @@ impl FossilWiki {
         };
         let mut sync_limits = cfg.limits;
         sync_limits.deadline = cfg.sync_deadline;
-        let wiki = Self {
+        let mut wiki = Self {
             inner: Arc::new(Inner {
                 binding,
                 fossil_bin: cfg.fossil_bin,
@@ -215,6 +217,7 @@ impl FossilWiki {
                 allow_local_writes: cfg.allow_local_writes,
                 allow_repository_sync: cfg.allow_repository_sync,
                 journal,
+                identity: None,
                 mutation: Mutex::new(()),
                 children: Semaphore::new(MAX_ACTIVE_CHILDREN),
             }),
@@ -228,10 +231,66 @@ impl FossilWiki {
             )
             .await
         {
-            Ok(o) if o.success() => Ok(wiki),
-            Err(ProcError::Spawn) => Err(StartupError::FossilUnavailable),
-            _ => Err(StartupError::NotAFossilRepository),
+            Ok(o) if o.success() => {}
+            Err(ProcError::Spawn) => return Err(StartupError::FossilUnavailable),
+            _ => return Err(StartupError::NotAFossilRepository),
         }
+        if wiki.inner.journal.is_some() {
+            let project_code = wiki.project_code().await?;
+            let identity = RepoIdentity {
+                project_code,
+                path: wiki.repo_arg(),
+            };
+            Arc::get_mut(&mut wiki.inner)
+                .expect("not yet shared")
+                .identity = Some(identity);
+        }
+        Ok(wiki)
+    }
+
+    /// The Fossil project code of the bound repository (`fossil info`).
+    async fn project_code(&self) -> Result<String, StartupError> {
+        let out = self
+            .run(&["info", "-R", &self.repo_arg()], None, self.inner.limits)
+            .await
+            .map_err(|_| StartupError::NotAFossilRepository)?;
+        if !out.success() {
+            return Err(StartupError::NotAFossilRepository);
+        }
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .find_map(|l| l.strip_prefix("project-code:"))
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_alphanumeric()))
+            .ok_or(StartupError::NotAFossilRepository)
+    }
+
+    fn identity(&self) -> Result<&RepoIdentity, ErrorCode> {
+        self.inner
+            .identity
+            .as_ref()
+            .ok_or(ErrorCode::ReceiptStoreUnavailable)
+    }
+
+    /// Whether a journal record belongs to the bound repository.
+    fn same_repository(&self, rec: &Record) -> Result<bool, ErrorCode> {
+        Ok(&rec.repository == self.identity()?)
+    }
+
+    /// Whether `uuid` exists as an artifact in the bound repository.
+    async fn artifact_present(&self, uuid: &str) -> Result<bool, ErrorCode> {
+        if uuid.is_empty() || !uuid.bytes().all(|b| b.is_ascii_alphanumeric()) {
+            return Ok(false);
+        }
+        let out = self
+            .run(
+                &["artifact", uuid, "-R", &self.repo_arg()],
+                None,
+                self.inner.limits,
+            )
+            .await
+            .map_err(proc_error_code)?;
+        Ok(out.success())
     }
 
     /// Alias of the bound repository.
@@ -489,9 +548,21 @@ impl FossilWiki {
                 if rec.request != req || rec.repo_id != self.repo_id() {
                     return fail(ErrorCode::IdempotencyConflict);
                 }
+                match self.same_repository(&rec) {
+                    Ok(true) => {}
+                    Ok(false) => return fail(ErrorCode::JournalRepositoryMismatch),
+                    Err(c) => return fail(c),
+                }
                 let retryable = rec.receipt.commit_state == types::CommitState::NotCommitted
                     && rec.receipt.retry_action == types::RetryAction::RetrySameOperation;
                 if !retryable {
+                    if let Some(rev) = &rec.receipt.revision {
+                        match self.artifact_present(rev).await {
+                            Ok(true) => {}
+                            Ok(false) => return fail(ErrorCode::JournalRepositoryMismatch),
+                            Err(c) => return fail(c),
+                        }
+                    }
                     let ok = rec.receipt.is_success();
                     return receipt_result(rec.receipt, !ok);
                 }
@@ -499,7 +570,11 @@ impl FossilWiki {
             Ok(None) => {}
         }
         // Reserve (commit already "unknown") before any child can run.
-        let rec = Record::reservation(self.repo_id(), id, req);
+        let identity = match self.identity() {
+            Ok(i) => i,
+            Err(c) => return fail(c),
+        };
+        let rec = Record::reservation(self.repo_id(), identity, id, req);
         if let Err(c) = self.persist(id, &rec) {
             return fail(c);
         }
@@ -526,7 +601,11 @@ impl FossilWiki {
             Err(c) => return fail(c),
         };
         match journal.get(&args.0.operation_id) {
-            Ok(Some(rec)) if rec.repo_id == self.repo_id() => receipt_result(rec.receipt, false),
+            Ok(Some(rec)) if rec.repo_id == self.repo_id() => match self.same_repository(&rec) {
+                Ok(true) => receipt_result(rec.receipt, false),
+                Ok(false) => fail(ErrorCode::JournalRepositoryMismatch),
+                Err(c) => fail(c),
+            },
             Ok(_) | Err(JournalError::BadKey) => fail(ErrorCode::UnknownOperation),
             Err(_) => fail(ErrorCode::ReceiptStoreUnavailable),
         }
@@ -552,6 +631,11 @@ impl FossilWiki {
             Ok(_) | Err(JournalError::BadKey) => return fail(ErrorCode::UnknownOperation),
             Err(_) => return fail(ErrorCode::ReceiptStoreUnavailable),
         };
+        match self.same_repository(&rec) {
+            Ok(true) => {}
+            Ok(false) => return fail(ErrorCode::JournalRepositoryMismatch),
+            Err(c) => return fail(c),
+        }
         if !args.0.retry_publication {
             return receipt_result(rec.receipt, false);
         }
@@ -571,6 +655,15 @@ impl FossilWiki {
         let Ok(_guard) = self.inner.mutation.try_lock() else {
             return fail(ErrorCode::Busy);
         };
+        let present = match rec.receipt.revision.as_deref() {
+            Some(rev) => self.artifact_present(rev).await,
+            None => Ok(false),
+        };
+        match present {
+            Ok(true) => {}
+            Ok(false) => return fail(ErrorCode::JournalRepositoryMismatch),
+            Err(c) => return fail(c),
+        }
         let mut rec = rec;
         let base = ReceiptBase {
             repo_id: rec.receipt.repo_id.clone(),

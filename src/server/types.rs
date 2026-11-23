@@ -196,6 +196,9 @@ pub enum ErrorCode {
     ReceiptStoreUnavailable,
     /// The response from fossil could not be understood or was too large.
     BadResponse,
+    /// The journal record belongs to a different repository than the bound
+    /// one (project code or path differs, or its artifact is absent).
+    JournalRepositoryMismatch,
 }
 
 impl ErrorCode {
@@ -219,6 +222,9 @@ impl ErrorCode {
             Self::UnknownOperation => "unknown operation id",
             Self::ReceiptStoreUnavailable => "the receipt store is unavailable",
             Self::BadResponse => "unexpected response from fossil",
+            Self::JournalRepositoryMismatch => {
+                "the receipt journal belongs to a different repository state"
+            }
         }
     }
 }

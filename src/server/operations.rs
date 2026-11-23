@@ -7,6 +7,12 @@
 //! or errors. A single `LOCK` file (exclusive create) admits one owner process;
 //! a stale lock fails closed and needs operator confirmation.
 //!
+//! Each record carries the repository identity (Fossil project code and
+//! canonical path); a record is replayed or reconciled only against that same
+//! repository and fails closed otherwise. The `LOCK` file serialises writers
+//! sharing one *state directory*; it does not stop a second process that uses a
+//! different state directory from writing to the same repository.
+//!
 //! A journal and a Fossil commit are not one transaction: the guarantee is
 //! at-most-once *automatic* submission with a conservative `unknown`, not
 //! exactly-once.
@@ -46,6 +52,17 @@ impl std::fmt::Debug for StoredRequest {
     }
 }
 
+/// Identity of the repository a record was written against: the Fossil
+/// project code plus the canonical repository path. The alias alone is an
+/// operator label and says nothing about which repository answered.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RepoIdentity {
+    /// Fossil `project-code` of the repository.
+    pub project_code: String,
+    /// Canonical path of the repository file.
+    pub path: String,
+}
+
 /// One persisted operation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Record {
@@ -53,6 +70,8 @@ pub struct Record {
     pub version: u32,
     /// Binding alias the record belongs to.
     pub repo_id: String,
+    /// Repository the operation ran against.
+    pub repository: RepoIdentity,
     /// Retained request.
     pub request: StoredRequest,
     /// Latest receipt.
@@ -62,7 +81,12 @@ pub struct Record {
 impl Record {
     /// A reservation written *before* any child is spawned: commit is already
     /// `unknown`, so a crash at any later point can never read as "not done".
-    pub fn reservation(repo_id: &str, operation_id: &str, request: StoredRequest) -> Self {
+    pub fn reservation(
+        repo_id: &str,
+        repository: &RepoIdentity,
+        operation_id: &str,
+        request: StoredRequest,
+    ) -> Self {
         let wants = request.publication == Publication::SyncRepository;
         let receipt = WriteReceipt {
             receipt_version: RECEIPT_VERSION,
@@ -83,6 +107,7 @@ impl Record {
         Self {
             version: RECEIPT_VERSION,
             repo_id: repo_id.to_string(),
+            repository: repository.clone(),
             request,
             receipt,
         }
@@ -258,6 +283,13 @@ impl Drop for Journal {
 mod tests {
     use super::*;
 
+    fn ident() -> RepoIdentity {
+        RepoIdentity {
+            project_code: "pc".into(),
+            path: "/r.fossil".into(),
+        }
+    }
+
     fn req(content: &str) -> StoredRequest {
         StoredRequest {
             page_name: "P".into(),
@@ -269,7 +301,10 @@ mod tests {
 
     #[test]
     fn debug_never_prints_content() {
-        let s = format!("{:?}", Record::reservation("r", "o", req("SECRET-BYTES")));
+        let s = format!(
+            "{:?}",
+            Record::reservation("r", &ident(), "o", req("SECRET-BYTES"))
+        );
         assert!(!s.contains("SECRET-BYTES"), "{s}");
     }
 
@@ -290,7 +325,7 @@ mod tests {
             Journal::open(&st, DEFAULT_JOURNAL_CAP).unwrap_err(),
             JournalError::Locked
         );
-        let rec = Record::reservation("r", "o1", req("c"));
+        let rec = Record::reservation("r", &ident(), "o1", req("c"));
         j.put("o1", &rec).unwrap();
         assert_eq!(j.get("o1").unwrap(), Some(rec));
         assert_eq!(j.get("nope").unwrap(), None);

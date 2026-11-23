@@ -27,7 +27,7 @@ mkdir -p "$D/calls"
 sub=""
 for a in "$@"; do
   case "$a" in
-    create|commit) [ -z "$sub" ] && sub="$a" ;;
+    create|commit|info|artifact|sql) [ -z "$sub" ] && sub="$a" ;;
     sync) [ -z "$sub" ] && sub=sync ;;
     get) [ -z "$sub" ] && sub=get ;;
     list) [ -z "$sub" ] && sub=list ;;
@@ -56,6 +56,29 @@ case "$sub" in
     fi
     ;;
   list) echo HomePage ;;
+  info)
+    echo "project-name: fixture"
+    if [ -f "$D/project_code" ]; then echo "project-code: $(cat "$D/project_code")"; else echo "project-code: PC1"; fi
+    ;;
+  sql)
+    # Candidate artifacts (parent/content filtering is done by the real SQL).
+    if [ -f "$D/sql_out" ]; then cat "$D/sql_out"
+    elif [ -f "$D/uuid" ] && [ ! -f "$D/force_parent" ]; then echo "'$(cat "$D/uuid")'"; fi
+    ;;
+  artifact)
+    [ -f "$D/missing_artifact" ] && exit 1
+    u=""
+    while [ $# -gt 0 ]; do
+      if [ "$1" = artifact ]; then u="$2"; break; fi
+      shift
+    done
+    if [ -f "$D/artifact_$u" ]; then cat "$D/artifact_$u"
+    elif [ -f "$D/uuid" ] && [ "$u" = "$(cat "$D/uuid")" ]; then
+      printf 'D t\nL P\nU fx\nW %s\n' "$(wc -c < "$D/content" | tr -d ' ')"
+      cat "$D/content"
+      printf '\nZ 00\n'
+    else exit 1; fi
+    ;;
   sync) echo "Round-trips: 1   Artifacts sent: 1  received: 0" ;;
 esac
 exit 0

@@ -1,7 +1,9 @@
 //! Idempotency journal: replay, restart windows, reconcile, fail-closed storage.
 mod common;
 use common::{FakeFossil, bound, is_error, parse, wargs};
-use fossil_mcp::server::operations::{DEFAULT_JOURNAL_CAP, Journal, Record, StoredRequest};
+use fossil_mcp::server::operations::{
+    DEFAULT_JOURNAL_CAP, Journal, Record, RepoIdentity, StoredRequest,
+};
 use fossil_mcp::server::types::{
     CommitState, ErrorCode, OperationStatusArgs, Publication, PublicationState,
     ReconcileOperationArgs, RetryAction,
@@ -139,6 +141,13 @@ async fn restart_after_unknown_never_blindly_commits() {
 async fn restart_after_intent_before_spawn_is_unknown() {
     let f = FakeFossil::new();
     let state = f.dir.path().join("state");
+    let ident = RepoIdentity {
+        project_code: "PC1".into(),
+        path: std::fs::canonicalize(f.repo_file())
+            .unwrap()
+            .to_string_lossy()
+            .into_owned(),
+    };
     {
         let j = Journal::open(&state, DEFAULT_JOURNAL_CAP).unwrap();
         let req = StoredRequest {
@@ -147,7 +156,7 @@ async fn restart_after_intent_before_spawn_is_unknown() {
             mimetype: None,
             publication: Publication::LocalOnly,
         };
-        j.put("k1", &Record::reservation("repo1", "k1", req))
+        j.put("k1", &Record::reservation("repo1", &ident, "k1", req))
             .unwrap();
     } // crash after durable reservation, before any child
     let w = bound(&f, |_| {}).await;

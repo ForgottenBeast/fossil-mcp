@@ -29,6 +29,13 @@ All notable changes to this project are documented here. The project follows
 - Sync is no longer reported as success when fossil exits 0 against an unreachable or
   wrong-project peer.
 
+- Receipts are bound to the repository, not only the alias: each journal record keeps
+  the Fossil project code and canonical path and is replayed or reconciled only against
+  that repository (`journal_repository_mismatch` otherwise). Replay and sync-only
+  reconcile also verify the recorded artifact exists in the bound repository.
+  The state-directory `LOCK` serialises writers sharing that directory only; it does
+  not coordinate two processes using different state directories on one repository.
+
 ### Security
 - Child output, paths and content never reach tool errors.
 
