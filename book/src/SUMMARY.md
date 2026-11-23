@@ -42,6 +42,7 @@
   - [list_wiki_pages](./api/list-wiki-pages.md)
   - [read_wiki_page](./api/read-wiki-page.md)
   - [write_wiki_page](./api/write-wiki-page.md)
+  - [wiki_backlinks](./api/wiki-backlinks.md)
 - [Types](./api/types.md)
   - [Request Types](./api/request-types.md)
   - [Response Types](./api/response-types.md)

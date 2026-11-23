@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is an MCP (Model Context Protocol) server that provides programmatic access to Fossil SCM wiki pages. It exposes five tools: list, read and write wiki pages, plus operation status and reconcile for write receipts.
+This is an MCP (Model Context Protocol) server that provides programmatic access to Fossil SCM wiki pages. It exposes five tools: list, read and write wiki pages, plus operation status and reconcile for write receipts. A sixth, read-only `wiki_backlinks`, exists only when the backlinks flag group is supplied.
 
 ## Build and Development Commands
 
@@ -69,6 +69,14 @@ The server requires a path to a Fossil repository file:
 `list_wiki_pages`, `read_wiki_page` (returns `revision`), `write_wiki_page`,
 `wiki_operation_status`, `wiki_reconcile_operation`. Read-only servers answer write/status/
 reconcile with `write_disabled`; the catalog does not change at runtime.
+
+### wiki_backlinks (optional, flag-gated)
+Present in the catalog only when `--backlinks-url`, `--backlinks-issuer`, `--backlinks-key-file`
+and at least one `--backlinks-audience-scope` are all given (`--backlinks-timeout-ms` optional).
+Code: `src/server/secret.rs` (opaque `Secret`, `FileSecretSource`, `ZitadelKey`),
+`src/server/backlinks/{mod,token,client}.rs`. The key file is read per token refresh and never
+from the environment; the token never leaves the process. Tests: `tests/backlinks_token.rs`,
+`tests/backlinks_tool.rs`, `tests/backlinks_stdio.rs` (fake issuer and sidecar on loopback).
 
 ### Testing
 `cargo test --locked --all-targets && cargo test --locked --doc`. Integration tests use the
@@ -167,6 +175,22 @@ Creates or updates a page and returns a typed receipt. Requires the server to be
 only `fossil sync` for an already committed revision whose publication is `pending` or `unknown`
 (needs `--allow-repository-sync`); it never creates a wiki artifact, and first verifies the recorded
 artifact exists in the bound repository.
+
+### wiki_backlinks
+Only listed when the backlinks flag group is supplied. Read-only, idempotent, open-world.
+
+**Parameters** (unknown fields are rejected):
+- `page` (string, required): 1-256 bytes, no NUL/CR/LF, not starting with `-`
+- `cursor` (string, optional): the previous response's `next_cursor` (`<generation>:<offset>`)
+- `limit` (integer, optional, 1-200, default 100)
+
+**Response**: `{schema_version: "backlinks.v1", repo_id, page, status: "current", checked_at,
+generation, inbound: [{source_page}], total_inbound, next_cursor}`. A cursor from an older index
+generation is `cursor_stale` (restart from the first page). Errors are fixed codes:
+`page_not_found`, `invalid_argument`, `backlinks_unavailable` (index `updating`/`unavailable`;
+retry shortly), `backlinks_auth_failed` and `backlinks_forbidden` (operator: key, allowlist,
+audience), `backlinks_unreachable`, `timeout`, `bad_response`, `backlinks_repo_mismatch` (the URL
+points at another wiki's sidecar), `credential_unavailable` (key file unreadable or unsafe).
 
 **Annotations**: reads and status are `readOnlyHint`; write and reconcile are not read-only,
 destructive (the visible page content is replaced, although Fossil history is append-only),

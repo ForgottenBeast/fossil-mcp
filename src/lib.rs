@@ -15,8 +15,13 @@
 //! Writes are disabled unless the operator starts the server with
 //! `--allow-local-writes --state-dir <private dir>`; `publication:
 //! sync_repository` additionally needs `--allow-repository-sync`.
-//! There are no credential fields, no runtime repository selection and no
-//! HTTP client. Remote authority and compare-and-swap are a separate gate;
+//! `wiki_backlinks` (read-only, paginated) exists only when the operator
+//! supplies the whole `--backlinks-*` flag group; it calls the repository's
+//! backlinks sidecar with a Zitadel machine-user token whose key is read from
+//! a file ([`server::secret`], [`server::backlinks`]).
+//!
+//! There are no credential fields and no runtime repository selection; the
+//! only HTTP client serves `wiki_backlinks`. Remote authority and compare-and-swap are a separate gate;
 //! the receipt's `previous_revision`/`revision` fields are where it plugs in.
 //!
 //! ## Example
@@ -52,6 +57,8 @@
 //!
 //! - [`server`]: handler, binding, process runner, receipt journal
 //! - [`server::types`]: wire types (the schema authority)
+//! - [`server::secret`], [`server::backlinks`]: opaque secrets, token flow and
+//!   bounded HTTP client for `wiki_backlinks`
 
 pub mod server;
 

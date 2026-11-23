@@ -20,6 +20,20 @@ All notable changes to this project are documented here. The project follows
 - Library: `FossilWiki::new(Option<PathBuf>)` is replaced by `FossilWiki::bind(WikiConfig)`.
 
 ### Added
+- `wiki_backlinks`: read-only, paginated list of the pages that link to a page, served by
+  the repository's backlinks sidecar. The tool exists only when the whole flag group is
+  given (`--backlinks-url`, `--backlinks-issuer`, `--backlinks-key-file`, at least one
+  `--backlinks-audience-scope`; optional `--backlinks-timeout-ms`, default 10000, 1000-60000).
+  The sidecar origin and issuer are fixed at startup (https; plain http only for `127.0.0.1`
+  and `[::1]`). Authentication is a Zitadel JWT-profile machine-user token: the RSA key is read
+  from the key file on every refresh (regular file, no symlink, at most 16 KiB, no access for
+  others), the token is cached in memory, a sidecar 401 triggers exactly one refresh and one
+  retry, and neither the token, the key nor the path appears in tool output, errors or logs.
+  New error codes: `cursor_stale`, `backlinks_unavailable`, `backlinks_forbidden`,
+  `backlinks_repo_mismatch`, `backlinks_auth_failed`, `backlinks_unreachable`,
+  `credential_unavailable`. The server gains an HTTP client again (`ureq` with rustls and
+  WebPKI roots, no OpenSSL) plus `jsonwebtoken` (RustCrypto backend), `zeroize` and `base64`.
+  Library: `WikiConfig::backlinks: Option<BacklinksConfig>`.
 - `wiki_operation_status`, `wiki_reconcile_operation`, private receipt journal.
 - Bounded subprocess runner; tests with throwaway repositories, fake-fossil fault
   injection, property tests, black-box stdio tests; `doCheck = true` and `checks.slice1`.

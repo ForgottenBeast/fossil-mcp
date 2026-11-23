@@ -4,7 +4,8 @@
 //! ([`FossilWiki::bind`]); nothing a client sends can change that binding.
 //! The stable tool catalog is `list_wiki_pages`, `read_wiki_page`,
 //! `write_wiki_page`, `wiki_operation_status` and `wiki_reconcile_operation`.
-//! Writes and reconciliation are disabled unless the operator opts in.
+//! Writes and reconciliation are disabled unless the operator opts in. A sixth
+//! tool, `wiki_backlinks`, is routed only when the backlinks flags are given.
 //!
 //! Every `fossil` child runs under the bounded runner in [`process`]; page
 //! bytes travel over stdin and no temporary content file exists. Failures
