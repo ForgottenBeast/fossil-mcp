@@ -3,7 +3,7 @@
 //!
 //! What is checkable here is the types: the buffers are `Zeroizing`, so wiping
 //! on every exit (success, `?`, panic unwinding) is the type's `Drop`. Copies
-//! made inside ureq (request/response buffers), rustls and serde_json cannot be
+//! made inside hyper (request/response buffers), rustls and serde_json cannot be
 //! reached from this crate and are documented as residual exposure in
 //! `server::secret`.
 mod fake_http;

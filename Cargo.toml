@@ -14,19 +14,26 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 schemars = "1.2"
 libc = "0.2"
-ureq = { version = "3", default-features = false, features = ["rustls"] }
+# HTTP stack for the backlinks sidecar. Chosen because nothing in it can log
+# request bytes: hyper's `tracing` feature (unstable) stays off, rustls is
+# built without `logging`, and redirects, proxies and decompression do not
+# exist. See src/server/backlinks/client.rs and tests/dependency_hygiene.rs.
+hyper = { version = "1", default-features = false, features = ["client", "http1"] }
+hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
+http-body-util = "0.1"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+webpki-roots = "1"
 zeroize = "1"
 # RS256 assertion signing and PEM decoding. Both are already in the tree via
 # rustls; using them instead of jsonwebtoken drops the `rsa` crate
 # (RUSTSEC-2023-0071, Marvin timing attack) from the lockfile.
 ring = "0.17"
 rustls-pki-types = "1"
-# Compile-time cap: ureq-proto logs raw request bytes (bearer, assertion) at
-# TRACE and ureq logs headers at DEBUG, with no feature to turn that off.
-# `max_level_info` makes every log! below INFO a no-op in the whole build, so
-# the cap holds for any logger an embedding application installs.
-log = { version = "0.4", features = ["max_level_info"] }
-
 [dev-dependencies]
 proptest = "1.4"
 tempfile = "3.8"
+# Simulates a downstream release build that lifts the log level cap, for
+# tests/backlinks_log.rs (`cargo test --release`). Test builds only; `log` is
+# not a dependency of the server itself.
+log = { version = "0.4", features = ["release_max_level_trace"] }

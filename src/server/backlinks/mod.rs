@@ -11,11 +11,11 @@ use crate::server::binding::BacklinksConfig;
 use crate::server::secret::{FileSecretSource, SecretSource, ZitadelKey};
 use crate::server::types::{ErrorCode, MAX_PAGE_NAME_BYTES};
 use client::{HttpClient, HttpConfig, HttpError};
+use hyper::Uri;
 use serde::Deserialize;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use token::TokenCache;
-use ureq::http::Uri;
 
 /// Largest accepted sidecar response (`MAX_PAGES` 20000 x 256-byte names fits).
 const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;

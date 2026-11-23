@@ -1,12 +1,21 @@
 //! I1: dependency logs must never carry the bearer token or the assertion,
-//! whatever logger the embedding application installs.
+//! whatever logger or subscriber the embedding application installs and
+//! whatever `log` level features it compiles in.
 //!
-//! `ureq-proto` logs raw request and response bytes at TRACE through the `log`
-//! facade. This test installs a logger that accepts every level, performs a
-//! full token exchange plus an authenticated GET against loopback fakes, and
-//! checks the captured records (and the bytes reconstructed from the hex dump
-//! rows) for the secrets. It is its own test binary because the `log` logger
-//! is process-global.
+//! The HTTP stack (hyper without its unstable `tracing` feature, rustls
+//! without its `logging` feature) has no logging call that can see request
+//! bytes, so there is nothing for a downstream crate to switch back on. This
+//! test proves it: it installs a `log` logger and a `tracing` subscriber that
+//! accept every level, performs a full token exchange plus an authenticated
+//! GET against loopback fakes, and checks every captured record from every
+//! crate for the secrets, and that no HTTP-stack crate logs at all.
+//!
+//! A downstream consumer's release build is simulated by the dev-dependency
+//! `log/release_max_level_trace`: run this file with
+//! `cargo test --release --test backlinks_log` and the cap is lifted exactly
+//! as an embedding application could lift it. (A debug build never applies
+//! `release_max_level_*`, so both profiles are meaningful.) It is its own test
+//! binary because both global subscribers are process-wide.
 mod fake_http;
 
 use fake_http::{Fake, Reply};
@@ -49,6 +58,43 @@ impl log::Log for Capture {
 }
 static CAPTURE: Capture = Capture;
 
+/// A `tracing` subscriber that enables everything and records events and span
+/// names with every field rendered through `Debug`.
+struct TraceCapture;
+struct Fields(String);
+impl tracing::field::Visit for Fields {
+    fn record_debug(&mut self, f: &tracing::field::Field, v: &dyn std::fmt::Debug) {
+        use std::fmt::Write;
+        let _ = write!(self.0, "{}={:?} ", f.name(), v);
+    }
+}
+impl tracing::Subscriber for TraceCapture {
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+    fn new_span(&self, a: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        let mut f = Fields(a.metadata().name().to_string());
+        a.record(&mut f);
+        RECORDS
+            .lock()
+            .unwrap()
+            .push((a.metadata().target().to_string(), log::Level::Trace, f.0));
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn event(&self, e: &tracing::Event<'_>) {
+        let mut f = Fields(String::new());
+        e.record(&mut f);
+        RECORDS
+            .lock()
+            .unwrap()
+            .push((e.metadata().target().to_string(), log::Level::Trace, f.0));
+    }
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
 fn http(cap: usize) -> HttpClient {
     HttpClient::new(HttpConfig {
         timeout: Duration::from_secs(5),
@@ -78,6 +124,7 @@ fn reconstruct_wire(lines: &[String]) -> String {
 fn dependency_logs_never_contain_token_or_assertion() {
     log::set_logger(&CAPTURE).unwrap();
     log::set_max_level(log::LevelFilter::Trace);
+    tracing::subscriber::set_global_default(TraceCapture).unwrap();
 
     let issuer =
         Fake::start(|_, _| Reply::json(200, json!({"access_token":TOKEN,"expires_in":3600})));
@@ -114,13 +161,12 @@ fn dependency_logs_never_contain_token_or_assertion() {
         assert!(!haystack.contains(&assertion), "assertion in {name}");
         assert!(!haystack.contains("assertion="), "form body in {name}");
     }
-    // Nothing below INFO may come out of the HTTP stack at all.
-    let verbose: Vec<_> = records
+    // No crate of the HTTP stack may log at all: only this crate's own
+    // records (and this test's) are allowed to exist.
+    let foreign: Vec<_> = records
         .iter()
-        .filter(|(t, l, _)| {
-            (t.starts_with("ureq") || t.starts_with("rustls")) && *l > log::Level::Info
-        })
+        .filter(|(t, _, _)| !(t.starts_with("fossil_mcp") || t.starts_with("backlinks_log")))
         .map(|(t, l, _)| format!("{l} {t}"))
         .collect();
-    assert!(verbose.is_empty(), "verbose dependency logs: {verbose:?}");
+    assert!(foreign.is_empty(), "dependency log records: {foreign:?}");
 }
