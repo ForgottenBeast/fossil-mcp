@@ -1,359 +1,229 @@
-use fossil_mcp::{FossilWiki, ReadWikiPageArgs, WriteWikiPageArgs};
+//! End-to-end tests against throwaway repositories made with the real `fossil`
+//! binary (isolated HOME, tempdir only). A missing fossil is a failure.
+mod common;
+use common::{is_error, isolated_fossil, parse, real_repo, wargs};
+use fossil_mcp::server::types::{
+    CommitState, ErrorCode, Publication, PublicationState, ReadWikiPageArgs,
+};
+use fossil_mcp::{FossilWiki, WikiConfig};
 use rmcp::handler::server::wrapper::Parameters;
-use std::path::PathBuf;
-use tokio::process::Command;
+use std::path::Path;
 
-/// Helper to create a temporary Fossil repository for testing
-async fn create_test_repo() -> (PathBuf, tempfile::TempDir) {
-    let temp_dir = tempfile::tempdir().expect("Failed to create temp directory");
+async fn wiki_for(repo: &Path, bin: &Path, state: &Path, sync: bool) -> FossilWiki {
+    let mut cfg = WikiConfig::new("itest", repo);
+    cfg.fossil_bin = bin.to_path_buf();
+    cfg.allow_local_writes = true;
+    cfg.allow_repository_sync = sync;
+    cfg.state_dir = Some(state.join("state"));
+    FossilWiki::bind(cfg).await.expect("bind")
+}
 
-    // Use a unique name for each test repo to avoid any collision issues
-    let unique_name = format!("test-{}.fossil", std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos());
-    let repo_path = temp_dir.path().join(unique_name);
-
-    // Delete the file if it somehow exists (shouldn't happen but be safe)
-    let _ = tokio::fs::remove_file(&repo_path).await;
-
-    // Create a new Fossil repository
-    let output = Command::new("fossil")
-        .arg("new")
-        .arg(&repo_path)
-        .output()
-        .await
-        .expect("Failed to create fossil repository");
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        panic!("Failed to create fossil repo: {}", stderr);
-    }
-
-    (repo_path, temp_dir)
+fn read(p: &str) -> Parameters<ReadWikiPageArgs> {
+    Parameters(ReadWikiPageArgs {
+        page_name: p.into(),
+    })
 }
 
 #[tokio::test]
-async fn test_list_empty_wiki() {
-    let (repo_path, _temp_dir) = create_test_repo().await;
-    let wiki = FossilWiki::new(Some(repo_path));
-
-    let result = wiki
-        .list_wiki_pages()
-        .await
-        .expect("Failed to list wiki pages");
-
-    // New repo should have empty or minimal pages
-    assert!(result.0.pages.is_empty() || result.0.pages.len() < 3);
+async fn list_empty_wiki() {
+    let (repo, bin, dir) = real_repo();
+    let w = wiki_for(&repo, &bin, dir.path(), false).await;
+    let pages = w.list_wiki_pages().await.unwrap().0.pages;
+    assert!(pages.is_empty(), "{pages:?}");
 }
 
 #[tokio::test]
-async fn test_write_and_read_wiki_page() {
-    let (repo_path, _temp_dir) = create_test_repo().await;
-    let wiki = FossilWiki::new(Some(repo_path));
-
-    // Write a wiki page
-    let write_args = Parameters(WriteWikiPageArgs {
-        page_name: "TestPage".to_string(),
-        content: "This is test content".to_string(),
-        mimetype: Some("text/x-fossil-wiki".to_string()),
-        skip_sync: true,
-        force_write: false,
-    });
-
-    let write_result = wiki
-        .write_wiki_page(write_args)
-        .await
-        .expect("Failed to write wiki page");
-
-    assert!(write_result.0.success);
-    assert_eq!(write_result.0.page_name, "TestPage");
-
-    // Read the wiki page back
-    let read_args = Parameters(ReadWikiPageArgs {
-        page_name: "TestPage".to_string(),
-    });
-
-    let read_result = wiki
-        .read_wiki_page(read_args)
-        .await
-        .expect("Failed to read wiki page");
-
-    assert_eq!(read_result.0.page_name, "TestPage");
-    assert_eq!(read_result.0.content, "This is test content");
-}
-
-#[tokio::test]
-async fn test_write_multiple_pages() {
-    let (repo_path, _temp_dir) = create_test_repo().await;
-    let wiki = FossilWiki::new(Some(repo_path));
-
-    // Write multiple pages
-    for i in 1..=3 {
-        let page_name = format!("Page{}", i);
-        let content = format!("Content for page {}", i);
-
-        let write_args = Parameters(WriteWikiPageArgs {
-            page_name: page_name.clone(),
-            content: content.clone(),
-            mimetype: Some("text/x-fossil-wiki".to_string()),
-            skip_sync: true,
-            force_write: false,
-        });
-
-        wiki.write_wiki_page(write_args)
+async fn create_then_update_proves_stdin_and_revision_chain() {
+    let (repo, bin, dir) = real_repo();
+    let w = wiki_for(&repo, &bin, dir.path(), false).await;
+    let big = "0123456789abcdef\n".repeat(60_000); // larger than a pipe buffer
+    let r1 = parse(
+        &w.write_wiki_page(wargs("op1", "Notes/Page", &big, Publication::LocalOnly))
             .await
-            .expect("Failed to write wiki page");
+            .unwrap(),
+    )
+    .receipt
+    .unwrap();
+    assert_eq!(r1.commit_state, CommitState::Committed);
+    assert_eq!(r1.previous_revision, None);
+    let rev1 = r1.revision.clone().expect("attributed revision");
+    let got = w.read_wiki_page(read("Notes/Page")).await.unwrap().0;
+    assert_eq!(got.content, big);
+    assert_eq!(
+        got.revision, rev1,
+        "read returns the artifact id the receipt reported"
+    );
+
+    let r2 = parse(
+        &w.write_wiki_page(wargs(
+            "op2",
+            "Notes/Page",
+            "Version 2",
+            Publication::LocalOnly,
+        ))
+        .await
+        .unwrap(),
+    )
+    .receipt
+    .unwrap();
+    assert_eq!(r2.previous_revision.as_deref(), Some(rev1.as_str()));
+    let got = w.read_wiki_page(read("Notes/Page")).await.unwrap().0;
+    assert_eq!(got.content, "Version 2");
+    assert_eq!(Some(got.revision), r2.revision);
+}
+
+#[tokio::test]
+async fn markdown_and_special_names() {
+    let (repo, bin, dir) = real_repo();
+    let w = wiki_for(&repo, &bin, dir.path(), false).await;
+    for (i, name) in [
+        "Page With Spaces",
+        "caf\u{e9} \u{2603}",
+        "A/B",
+        "A_B",
+        "x.y-z",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let content = format!("# {name}\n\n**bold** & <tag> \"q\" 'a' $HOME `cmd`");
+        let r = w
+            .write_wiki_page(wargs(
+                &format!("op{i}"),
+                name,
+                &content,
+                Publication::LocalOnly,
+            ))
+            .await
+            .unwrap();
+        assert!(!is_error(&r), "{name}");
+        assert_eq!(
+            w.read_wiki_page(read(name)).await.unwrap().0.content,
+            content,
+            "{name}"
+        );
     }
-
-    // List pages and verify they exist
-    let list_result = wiki
-        .list_wiki_pages()
-        .await
-        .expect("Failed to list wiki pages");
-
-    assert!(list_result.0.pages.contains(&"Page1".to_string()));
-    assert!(list_result.0.pages.contains(&"Page2".to_string()));
-    assert!(list_result.0.pages.contains(&"Page3".to_string()));
+    let pages = w.list_wiki_pages().await.unwrap().0.pages;
+    assert!(
+        pages.contains(&"A/B".to_string()) && pages.contains(&"A_B".to_string()),
+        "no aliasing: {pages:?}"
+    );
 }
 
 #[tokio::test]
-async fn test_write_wiki_page_markdown() {
-    let (repo_path, _temp_dir) = create_test_repo().await;
-    let wiki = FossilWiki::new(Some(repo_path));
-
-    let markdown_content = "# Test Page\n\nThis is **bold** and this is *italic*.";
-
-    let write_args = Parameters(WriteWikiPageArgs {
-        page_name: "MarkdownPage".to_string(),
-        content: markdown_content.to_string(),
-        mimetype: Some("text/x-markdown".to_string()),
-        skip_sync: true,
-        force_write: false,
-    });
-
-    let write_result = wiki
-        .write_wiki_page(write_args)
-        .await
-        .expect("Failed to write wiki page");
-
-    assert!(write_result.0.success);
-
-    // Read it back and verify
-    let read_args = Parameters(ReadWikiPageArgs {
-        page_name: "MarkdownPage".to_string(),
-    });
-
-    let read_result = wiki
-        .read_wiki_page(read_args)
-        .await
-        .expect("Failed to read wiki page");
-
-    assert_eq!(read_result.0.content, markdown_content);
+async fn read_missing_page_is_a_fixed_error() {
+    let (repo, bin, dir) = real_repo();
+    let w = wiki_for(&repo, &bin, dir.path(), false).await;
+    let e = w.read_wiki_page(read("Nope")).await.err().unwrap();
+    assert!(e.starts_with("page_not_found:"), "{e}");
+    assert!(!e.contains(repo.to_str().unwrap()), "no paths in errors");
 }
 
 #[tokio::test]
-async fn test_update_existing_page() {
-    let (repo_path, _temp_dir) = create_test_repo().await;
-    let wiki = FossilWiki::new(Some(repo_path));
-
-    // Write initial version
-    let write_args = Parameters(WriteWikiPageArgs {
-        page_name: "UpdateTest".to_string(),
-        content: "Version 1".to_string(),
-        mimetype: None,
-        skip_sync: true,
-        force_write: false,
-    });
-
-    wiki.write_wiki_page(write_args)
+async fn real_no_remote_sync_is_pending_and_keeps_commit() {
+    let (repo, bin, dir) = real_repo();
+    let w = wiki_for(&repo, &bin, dir.path(), true).await;
+    let r = w
+        .write_wiki_page(wargs("op1", "P", "v1", Publication::SyncRepository))
         .await
-        .expect("Failed to write wiki page");
+        .unwrap();
+    assert!(is_error(&r));
+    let rc = parse(&r).receipt.unwrap();
+    assert_eq!(rc.commit_state, CommitState::Committed);
+    assert_eq!(rc.publication_state, PublicationState::Pending);
+    assert_eq!(rc.error_code, Some(ErrorCode::NoRemote));
+    assert_eq!(w.read_wiki_page(read("P")).await.unwrap().0.content, "v1");
+}
 
-    // Update the page
-    let write_args = Parameters(WriteWikiPageArgs {
-        page_name: "UpdateTest".to_string(),
-        content: "Version 2 - Updated".to_string(),
-        mimetype: None,
-        skip_sync: true,
-        force_write: false,
-    });
-
-    wiki.write_wiki_page(write_args)
-        .await
-        .expect("Failed to update wiki page");
-
-    // Read and verify the update
-    let read_args = Parameters(ReadWikiPageArgs {
-        page_name: "UpdateTest".to_string(),
-    });
-
-    let read_result = wiki
-        .read_wiki_page(read_args)
-        .await
-        .expect("Failed to read wiki page");
-
-    assert_eq!(read_result.0.content, "Version 2 - Updated");
+/// Clone a throwaway "remote" so sync has a real peer over file://.
+fn clone_pair(dir: &Path, bin: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    let srv = dir.join("srv.fossil");
+    let st = std::process::Command::new(bin)
+        .arg("new")
+        .arg(&srv)
+        .output()
+        .unwrap();
+    assert!(st.status.success());
+    let loc = dir.join("loc.fossil");
+    let st = std::process::Command::new(bin)
+        .arg("clone")
+        .arg(format!("file://{}", srv.display()))
+        .arg(&loc)
+        .output()
+        .unwrap();
+    assert!(st.status.success(), "clone failed");
+    (srv, loc)
 }
 
 #[tokio::test]
-async fn test_wiki_page_with_special_characters() {
-    let (repo_path, _temp_dir) = create_test_repo().await;
-    let wiki = FossilWiki::new(Some(repo_path));
-
-    let special_content = "Special chars: @#$%^&*()_+-=[]{}|;:,.<>?";
-
-    let write_args = Parameters(WriteWikiPageArgs {
-        page_name: "SpecialChars".to_string(),
-        content: special_content.to_string(),
-        mimetype: None,
-        skip_sync: true,
-        force_write: false,
-    });
-
-    wiki.write_wiki_page(write_args)
+async fn real_sync_to_peer_is_confirmed_and_peer_has_page() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = isolated_fossil(dir.path());
+    let (srv, loc) = clone_pair(dir.path(), &bin);
+    let w = wiki_for(&loc, &bin, dir.path(), true).await;
+    let r = w
+        .write_wiki_page(wargs(
+            "op1",
+            "Synced",
+            "hello peer",
+            Publication::SyncRepository,
+        ))
         .await
-        .expect("Failed to write wiki page");
-
-    let read_args = Parameters(ReadWikiPageArgs {
-        page_name: "SpecialChars".to_string(),
-    });
-
-    let read_result = wiki
-        .read_wiki_page(read_args)
-        .await
-        .expect("Failed to read wiki page");
-
-    assert_eq!(read_result.0.content, special_content);
+        .unwrap();
+    assert!(!is_error(&r), "{r:?}");
+    let rc = parse(&r).receipt.unwrap();
+    assert_eq!(
+        (rc.commit_state, rc.publication_state),
+        (CommitState::Committed, PublicationState::Confirmed)
+    );
+    let out = std::process::Command::new(&bin)
+        .args(["wiki", "export", "Synced", "-R"])
+        .arg(&srv)
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&out.stdout).contains("hello peer"));
 }
 
 #[tokio::test]
-async fn test_read_nonexistent_page() {
-    let (repo_path, _temp_dir) = create_test_repo().await;
-    let wiki = FossilWiki::new(Some(repo_path));
-
-    let read_args = Parameters(ReadWikiPageArgs {
-        page_name: "NonexistentPage".to_string(),
-    });
-
-    let result = wiki.read_wiki_page(read_args).await;
-    assert!(result.is_err());
-}
-
-#[tokio::test]
-async fn test_write_wiki_page_skip_sync() {
-    let (repo_path, _temp_dir) = create_test_repo().await;
-    let wiki = FossilWiki::new(Some(repo_path));
-
-    let write_args = Parameters(WriteWikiPageArgs {
-        page_name: "SkipSyncTest".to_string(),
-        content: "Content with skip_sync".to_string(),
-        mimetype: None,
-        skip_sync: true,
-        force_write: false,
-    });
-
-    let write_result = wiki
-        .write_wiki_page(write_args)
+async fn real_sync_with_wrong_project_peer_is_not_confirmed() {
+    // fossil exits 0 for this case; the receipt must still not say confirmed.
+    let dir = tempfile::tempdir().unwrap();
+    let bin = isolated_fossil(dir.path());
+    let new = |p: &Path| {
+        assert!(
+            std::process::Command::new(&bin)
+                .arg("new")
+                .arg(p)
+                .output()
+                .unwrap()
+                .status
+                .success()
+        )
+    };
+    let other = dir.path().join("other.fossil");
+    let repo = dir.path().join("mine.fossil");
+    new(&other);
+    new(&repo);
+    let url = format!("file://{}", other.display());
+    let st = std::process::Command::new(&bin)
+        .args(["remote", "add", "peer", &url, "-R"])
+        .arg(&repo)
+        .output()
+        .unwrap();
+    assert!(st.status.success());
+    let st = std::process::Command::new(&bin)
+        .args(["remote", "peer", "-R"])
+        .arg(&repo)
+        .output()
+        .unwrap();
+    assert!(st.status.success());
+    let w = wiki_for(&repo, &bin, dir.path(), true).await;
+    let r = w
+        .write_wiki_page(wargs("op1", "P", "v", Publication::SyncRepository))
         .await
-        .expect("Failed to write wiki page");
-
-    assert!(write_result.0.success);
-    // When skip_sync is true, sync_status should be None
-    assert!(write_result.0.sync_status.is_none());
-}
-
-#[tokio::test]
-async fn test_write_wiki_page_with_sync_no_remote() {
-    let (repo_path, _temp_dir) = create_test_repo().await;
-    let wiki = FossilWiki::new(Some(repo_path));
-
-    let write_args = Parameters(WriteWikiPageArgs {
-        page_name: "SyncNoRemoteTest".to_string(),
-        content: "Content with sync attempted".to_string(),
-        mimetype: None,
-        skip_sync: false,
-        force_write: false,
-    });
-
-    let write_result = wiki
-        .write_wiki_page(write_args)
-        .await
-        .expect("Failed to write wiki page");
-
-    assert!(write_result.0.success);
-    // Sync should be attempted but likely fail with NoRemoteConfigured since no remote is set up
-    assert!(write_result.0.sync_status.is_some());
-    let sync_status = write_result.0.sync_status.unwrap();
-    assert!(sync_status.attempted);
-    // Since no remote is configured, sync will fail but page should still be written
-}
-
-#[tokio::test]
-async fn test_write_wiki_page_force_write_false() {
-    let (repo_path, _temp_dir) = create_test_repo().await;
-    let wiki = FossilWiki::new(Some(repo_path));
-
-    let write_args = Parameters(WriteWikiPageArgs {
-        page_name: "ForceWriteFalseTest".to_string(),
-        content: "Content without force write".to_string(),
-        mimetype: None,
-        skip_sync: true,
-        force_write: false,
-    });
-
-    let write_result = wiki
-        .write_wiki_page(write_args)
-        .await
-        .expect("Failed to write wiki page");
-
-    assert!(write_result.0.success);
-    // With skip_sync=true and force_write=false, no sync is attempted
-    assert!(write_result.0.sync_status.is_none());
-}
-
-#[tokio::test]
-async fn test_write_wiki_page_force_write_true() {
-    let (repo_path, _temp_dir) = create_test_repo().await;
-    let wiki = FossilWiki::new(Some(repo_path));
-
-    let write_args = Parameters(WriteWikiPageArgs {
-        page_name: "ForceWriteTrueTest".to_string(),
-        content: "Content with force write".to_string(),
-        mimetype: None,
-        skip_sync: true,
-        force_write: true,
-    });
-
-    let write_result = wiki
-        .write_wiki_page(write_args)
-        .await
-        .expect("Failed to write wiki page");
-
-    assert!(write_result.0.success);
-}
-
-#[tokio::test]
-async fn test_sync_status_blocking_error() {
-    let (repo_path, _temp_dir) = create_test_repo().await;
-    let wiki = FossilWiki::new(Some(repo_path));
-
-    // This test verifies that when a sync status has a blocking error (can_force_write=true),
-    // the page is still written but with proper error status
-    let write_args = Parameters(WriteWikiPageArgs {
-        page_name: "BlockingErrorTest".to_string(),
-        content: "Test content".to_string(),
-        mimetype: None,
-        skip_sync: true,
-        force_write: false,
-    });
-
-    let write_result = wiki
-        .write_wiki_page(write_args)
-        .await
-        .expect("Failed to write wiki page");
-
-    assert!(write_result.0.success);
-    // With skip_sync=true, no sync attempt is made
-    assert!(write_result.0.sync_status.is_none());
+        .unwrap();
+    let rc = parse(&r).receipt.unwrap();
+    assert_eq!(rc.commit_state, CommitState::Committed);
+    assert_ne!(rc.publication_state, PublicationState::Confirmed);
+    assert!(is_error(&r));
 }

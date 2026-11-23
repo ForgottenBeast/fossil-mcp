@@ -2,6 +2,10 @@
 //! Nothing here touches a real wiki; every path lives under a `TempDir`.
 #![allow(dead_code)]
 
+use fossil_mcp::server::types::{Publication, WriteWikiPageArgs};
+use fossil_mcp::{FossilWiki, WikiConfig, WriteToolOutput};
+use rmcp::handler::server::wrapper::Parameters;
+use rmcp::model::CallToolResult;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -45,6 +49,7 @@ case "$sub" in
   get)
     if [ -f "$D/uuid" ]; then
       p=""; [ -f "$D/parent" ] && p=$(cat "$D/parent")
+      [ -f "$D/force_parent" ] && p=$(cat "$D/force_parent")
       printf '{"payload":{"name":"P","uuid":"%s","parent":"%s","content":"x"}}\n' "$(cat "$D/uuid")" "$p"
     else
       printf '{"resultCode":"FOSSIL-3006","resultText":"Wiki page not found"}\n'
@@ -60,8 +65,21 @@ impl FakeFossil {
     pub fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("fossil");
-        fs::write(&bin, SCRIPT.replace("__DIR__", dir.path().to_str().unwrap())).unwrap();
+        fs::write(
+            &bin,
+            SCRIPT.replace("__DIR__", dir.path().to_str().unwrap()),
+        )
+        .unwrap();
         fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+        settle(&bin);
+        for e in fs::read_dir(dir.path().join("calls"))
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let _ = fs::remove_file(e.path());
+        }
+        let _ = fs::remove_file(dir.path().join("pid."));
         Self { dir, bin }
     }
 
@@ -112,6 +130,23 @@ impl FakeFossil {
     }
 }
 
+/// Wait out ETXTBSY: a script just written can still be held open for write by
+/// a concurrently forked sibling test until that child execs.
+fn settle(bin: &Path) {
+    for _ in 0..200 {
+        match std::process::Command::new(bin)
+            .arg("--settle-probe")
+            .output()
+        {
+            Err(e) if e.raw_os_error() == Some(26) => {
+                std::thread::sleep(std::time::Duration::from_millis(10))
+            }
+            _ => return,
+        }
+    }
+    panic!("script stayed busy");
+}
+
 /// Wrapper script that runs the real `fossil` with an isolated HOME.
 pub fn isolated_fossil(dir: &Path) -> PathBuf {
     let real = which("fossil").expect("fossil binary must be on PATH for integration tests");
@@ -129,6 +164,7 @@ pub fn isolated_fossil(dir: &Path) -> PathBuf {
     )
     .unwrap();
     fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+    settle(&bin);
     bin
 }
 
@@ -152,4 +188,38 @@ pub fn real_repo() -> (PathBuf, PathBuf, tempfile::TempDir) {
         .expect("fossil new");
     assert!(st.status.success(), "fossil new failed");
     (repo, bin, dir)
+}
+
+/// Bind a wiki to the fake fossil. `tweak` adjusts the config.
+pub async fn bound(f: &FakeFossil, tweak: impl FnOnce(&mut WikiConfig)) -> FossilWiki {
+    let mut cfg = WikiConfig::new("repo1", f.repo_file());
+    cfg.fossil_bin = f.bin.clone();
+    cfg.allow_local_writes = true;
+    cfg.state_dir = Some(f.dir.path().join("state"));
+    tweak(&mut cfg);
+    FossilWiki::bind(cfg).await.expect("bind")
+}
+
+pub fn wargs(
+    op: &str,
+    page: &str,
+    content: &str,
+    publication: Publication,
+) -> Parameters<WriteWikiPageArgs> {
+    Parameters(WriteWikiPageArgs {
+        operation_id: op.into(),
+        page_name: page.into(),
+        content: content.into(),
+        mimetype: None,
+        publication,
+    })
+}
+
+/// Parse the structured body of a write-family tool result.
+pub fn parse(r: &CallToolResult) -> WriteToolOutput {
+    serde_json::from_value(r.structured_content.clone().expect("structured content")).unwrap()
+}
+
+pub fn is_error(r: &CallToolResult) -> bool {
+    r.is_error == Some(true)
 }
