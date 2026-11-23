@@ -416,19 +416,16 @@ async fn two_calls_use_one_token_request() {
 }
 
 #[tokio::test]
-async fn expired_token_is_fetched_again() {
+async fn token_inside_the_refresh_margin_is_an_auth_failure() {
+    // expires_in <= 60 s can never be cached: the issuer's policy is wrong,
+    // and the sidecar is not called with a token that is about to expire.
     let e = env(|_, _| Reply::json(200, page_body(json!([]))), 60);
     let w = wiki(&e, 5000).await;
-    call(&w, args("Target", None, None)).await.unwrap();
-    call(&w, args("Target", None, None)).await.unwrap();
-    assert_eq!(e.issuer.count(), 2);
-    let auth: Vec<_> = e
-        .sidecar
-        .requests()
-        .iter()
-        .map(|r| r.header("authorization").unwrap().to_string())
-        .collect();
-    assert_eq!(auth, ["Bearer tok1", "Bearer tok2"]);
+    assert_code(
+        call(&w, args("Target", None, None)).await,
+        ErrorCode::BacklinksAuthFailed,
+    );
+    assert_eq!(e.sidecar.count(), 0);
 }
 
 #[tokio::test]
