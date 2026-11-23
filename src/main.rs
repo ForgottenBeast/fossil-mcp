@@ -12,7 +12,7 @@
 //! ```
 //!
 //! The optional `wiki_backlinks` tool needs the whole flag group; without it
-//! the tool does not exist. The credential is read from the key file on
+//! the tool does not exist. The key file is checked at startup, read again on
 //! every token refresh and is never taken from the environment or an argument.
 //!
 //! ```bash

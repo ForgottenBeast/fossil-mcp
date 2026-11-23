@@ -74,7 +74,7 @@ reconcile with `write_disabled`; the catalog does not change at runtime.
 Present in the catalog only when `--backlinks-url`, `--backlinks-issuer`, `--backlinks-key-file`
 and at least one `--backlinks-audience-scope` are all given (`--backlinks-timeout-ms` optional).
 Code: `src/server/secret.rs` (opaque `Secret`, `FileSecretSource`, `ZitadelKey`),
-`src/server/backlinks/{mod,token,client}.rs`. The key file is read per token refresh and never
+`src/server/backlinks/{mod,token,client}.rs`. The key file is checked at startup, read per token refresh and never
 from the environment; the token never leaves the process. Tests: `tests/backlinks_token.rs`,
 `tests/backlinks_tool.rs`, `tests/backlinks_stdio.rs` (fake issuer and sidecar on loopback).
 

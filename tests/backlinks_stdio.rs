@@ -360,14 +360,48 @@ async fn call_over_stdio_works_and_leaks_no_secret() {
 }
 
 #[tokio::test]
-async fn credential_failure_over_stdio_is_fixed_and_pathless() {
+async fn unsafe_key_file_fails_startup_with_a_fixed_pathless_message() {
     let (repo, bin, dir) = real_repo();
     let key = key_file(dir.path());
     std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o644)).unwrap();
     let (issuer, sidecar) = fakes();
     let mut a = base_args(&repo, &bin);
     a.extend(group(&sidecar.url(), &issuer.url(), &key));
+    let out = tokio::time::timeout(
+        Duration::from_secs(10),
+        Command::new(BIN).args(&a).stdin(Stdio::null()).output(),
+    )
+    .await
+    .expect("must exit at startup, not serve")
+    .unwrap();
+    assert!(!out.status.success());
+    assert!(out.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("key file"), "{stderr}");
+    assert!(!stderr.contains("SENTINEL-KEYFILE-NAME"), "{stderr}");
+    assert!(!stderr.contains(dir.path().to_str().unwrap()), "{stderr}");
+    assert_eq!(issuer.count() + sidecar.count(), 0);
+}
+
+#[tokio::test]
+async fn missing_key_file_fails_startup() {
+    let (repo, bin, dir) = real_repo();
+    let key = dir.path().join("SENTINEL-KEYFILE-NAME.json");
+    let (issuer, sidecar) = fakes();
+    let mut a = base_args(&repo, &bin);
+    a.extend(group(&sidecar.url(), &issuer.url(), &key));
+    assert!(exits_nonzero(&a).await);
+}
+
+#[tokio::test]
+async fn key_file_that_breaks_after_startup_is_still_a_runtime_error() {
+    let (repo, bin, dir) = real_repo();
+    let key = key_file(dir.path());
+    let (issuer, sidecar) = fakes();
+    let mut a = base_args(&repo, &bin);
+    a.extend(group(&sidecar.url(), &issuer.url(), &key));
     let mut c = Client::start(&a).await;
+    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o644)).unwrap();
     let r = c.call("wiki_backlinks", json!({"page":"Home"})).await;
     assert_eq!(r["result"]["isError"], json!(true), "{r}");
     let text = r.to_string();

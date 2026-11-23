@@ -8,7 +8,7 @@ pub mod client;
 pub mod token;
 
 use crate::server::binding::BacklinksConfig;
-use crate::server::secret::FileSecretSource;
+use crate::server::secret::{FileSecretSource, SecretSource, ZitadelKey};
 use crate::server::types::{ErrorCode, MAX_PAGE_NAME_BYTES};
 use client::{HttpClient, HttpConfig, HttpError};
 use serde::Deserialize;
@@ -107,9 +107,14 @@ pub fn percent_encode_into(out: &mut String, s: &str) {
     }
 }
 
-/// The backlinks configuration is not acceptable.
+/// Why a [`BacklinksService`] could not be built.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct InvalidConfig;
+pub enum InitError {
+    /// The configuration is not acceptable.
+    InvalidConfig,
+    /// The key file is missing, unsafe or not a usable key. Carries no path.
+    Credential,
+}
 
 /// A failed sidecar exchange: a fixed code and, for an unavailable index,
 /// its status (only the two known values are ever carried).
@@ -176,11 +181,16 @@ pub struct BacklinksService {
 }
 
 impl BacklinksService {
-    /// Validate `cfg` and build the client. Reads no file: the key is read
-    /// when a token is needed, so a rotated key is picked up.
-    pub fn new(cfg: &BacklinksConfig) -> Result<Self, InvalidConfig> {
-        let sidecar = Origin::parse(&cfg.url).map_err(|_| InvalidConfig)?;
-        let issuer = Origin::parse(&cfg.issuer).map_err(|_| InvalidConfig)?;
+    /// Validate `cfg` and build the client.
+    ///
+    /// The key file is checked once here (exists, regular, mode, size, parses
+    /// as a Zitadel key with a usable RSA key) so a deployment mistake stops
+    /// the server at startup. It is read again on every token refresh, so a
+    /// rotated key is still picked up, and a key that breaks later is a
+    /// runtime `credential_unavailable`. No network call is made.
+    pub fn new(cfg: &BacklinksConfig) -> Result<Self, InitError> {
+        let sidecar = Origin::parse(&cfg.url).map_err(|_| InitError::InvalidConfig)?;
+        let issuer = Origin::parse(&cfg.issuer).map_err(|_| InitError::InvalidConfig)?;
         if !TIMEOUT_RANGE_MS.contains(&cfg.timeout.as_millis())
             || cfg.key_file.as_os_str().is_empty()
             || cfg.audience_scopes.is_empty()
@@ -188,8 +198,13 @@ impl BacklinksService {
                 !s.is_empty() && s.len() <= 256 && s.bytes().all(|b| (0x21..=0x7e).contains(&b))
             })
         {
-            return Err(InvalidConfig);
+            return Err(InitError::InvalidConfig);
         }
+        let source = FileSecretSource::new(&cfg.key_file);
+        let raw = source.read().map_err(|_| InitError::Credential)?;
+        let key = ZitadelKey::parse(&raw).map_err(|_| InitError::Credential)?;
+        token::check_signing_key(&key).map_err(|_| InitError::Credential)?;
+        drop((raw, key));
         let connect_timeout = CONNECT_TIMEOUT.min(cfg.timeout);
         let token_http = Arc::new(HttpClient::new(HttpConfig {
             timeout: cfg.timeout,
@@ -202,7 +217,7 @@ impl BacklinksService {
             max_body: MAX_RESPONSE_BYTES,
         });
         let tokens = TokenCache::new(
-            Arc::new(FileSecretSource::new(&cfg.key_file)),
+            Arc::new(source),
             token_http,
             issuer,
             cfg.audience_scopes.clone(),
