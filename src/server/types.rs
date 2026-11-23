@@ -199,6 +199,13 @@ pub enum ErrorCode {
     /// The journal record belongs to a different repository than the bound
     /// one (project code or path differs, or its artifact is absent).
     JournalRepositoryMismatch,
+    /// The sidecar rejected the credential (after one refresh) or the issuer
+    /// refused the grant: key, allowlist or audience need operator action.
+    BacklinksAuthFailed,
+    /// The sidecar or the issuer could not be reached.
+    BacklinksUnreachable,
+    /// The credential file is unreadable, unsafe or invalid.
+    CredentialUnavailable,
 }
 
 impl ErrorCode {
@@ -225,6 +232,9 @@ impl ErrorCode {
             Self::JournalRepositoryMismatch => {
                 "the receipt journal belongs to a different repository state"
             }
+            Self::BacklinksAuthFailed => "the backlinks service rejected the credential",
+            Self::BacklinksUnreachable => "the backlinks service could not be reached",
+            Self::CredentialUnavailable => "the backlinks credential is unavailable",
         }
     }
 }

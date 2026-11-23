@@ -33,10 +33,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{Mutex, Semaphore};
 
+pub mod backlinks;
 pub mod binding;
 pub mod operations;
 pub mod outcome;
 pub mod process;
+pub mod secret;
 pub mod types;
 
 use binding::{RepositoryBinding, StartupError, WikiConfig};
