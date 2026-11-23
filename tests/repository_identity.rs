@@ -1,6 +1,6 @@
 //! The journal is bound to the repository, not only to the operator alias.
 mod common;
-use common::{FakeFossil, bound, is_error, parse, wargs};
+use common::{FakeFossil, bound, is_error, parse, real_repo, wargs};
 use fossil_mcp::WikiConfig;
 use fossil_mcp::server::types::{
     CommitState, ErrorCode, OperationStatusArgs, Publication, PublicationState,
@@ -139,5 +139,98 @@ async fn missing_artifact_blocks_replay_and_reconcile() {
         parse(&r).error_code,
         Some(ErrorCode::JournalRepositoryMismatch),
         "a stale committed receipt is not replayed"
+    );
+}
+
+fn plain_reconcile(op: &str) -> Parameters<ReconcileOperationArgs> {
+    Parameters(ReconcileOperationArgs {
+        operation_id: op.into(),
+        retry_publication: false,
+    })
+}
+
+fn assert_mismatch(out: &rmcp::model::CallToolResult, what: &str) {
+    let o = parse(out);
+    assert_eq!(
+        o.error_code,
+        Some(ErrorCode::JournalRepositoryMismatch),
+        "{what}"
+    );
+    assert!(is_error(out), "{what}");
+    let committed = o
+        .receipt
+        .as_ref()
+        .is_some_and(|r| r.commit_state == CommitState::Committed);
+    assert!(
+        !committed,
+        "{what}: a missing artifact is never reported committed"
+    );
+}
+
+#[tokio::test]
+async fn status_and_plain_reconcile_check_the_artifact_exists() {
+    let f = FakeFossil::new();
+    let w = bound(&f, |_| {}).await;
+    let r = w
+        .write_wiki_page(wargs("op1", "P", "v1", Publication::LocalOnly))
+        .await
+        .unwrap();
+    assert_eq!(
+        parse(&r).receipt.unwrap().commit_state,
+        CommitState::Committed
+    );
+    let ok = w.wiki_operation_status(status("op1")).await.unwrap();
+    assert!(
+        !is_error(&ok) && parse(&ok).receipt.is_some(),
+        "present artifact"
+    );
+    std::fs::write(f.file("missing_artifact"), "").unwrap();
+    assert_mismatch(
+        &w.wiki_operation_status(status("op1")).await.unwrap(),
+        "status",
+    );
+    assert_mismatch(
+        &w.wiki_reconcile_operation(plain_reconcile("op1"))
+            .await
+            .unwrap(),
+        "no-retry reconcile",
+    );
+}
+
+/// The re-review restore probe with a real repository: same path and project
+/// code, restored from a snapshot that predates the write.
+#[tokio::test]
+async fn restored_repository_is_not_reported_committed_by_status() {
+    let (repo, bin, dir) = real_repo();
+    let mk = |bin: &std::path::Path| {
+        let mut cfg = WikiConfig::new("itest", &repo);
+        cfg.fossil_bin = bin.to_path_buf();
+        cfg.allow_local_writes = true;
+        cfg.state_dir = Some(dir.path().join("state"));
+        cfg
+    };
+    let snapshot = dir.path().join("snapshot.fossil");
+    std::fs::copy(&repo, &snapshot).unwrap();
+    let w = fossil_mcp::FossilWiki::bind(mk(&bin)).await.unwrap();
+    let r = w
+        .write_wiki_page(wargs("restore", "Restored", "gone", Publication::LocalOnly))
+        .await
+        .unwrap();
+    assert_eq!(
+        parse(&r).receipt.unwrap().commit_state,
+        CommitState::Committed
+    );
+    drop(w);
+    std::fs::copy(&snapshot, &repo).unwrap();
+    let w = fossil_mcp::FossilWiki::bind(mk(&bin)).await.unwrap();
+    assert_mismatch(
+        &w.wiki_operation_status(status("restore")).await.unwrap(),
+        "status",
+    );
+    assert_mismatch(
+        &w.wiki_reconcile_operation(plain_reconcile("restore"))
+            .await
+            .unwrap(),
+        "no-retry reconcile",
     );
 }

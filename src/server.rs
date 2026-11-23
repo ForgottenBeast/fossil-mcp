@@ -335,6 +335,19 @@ impl FossilWiki {
         Ok(out.success())
     }
 
+    /// A recorded revision must exist in the bound repository: the project
+    /// code and path survive a restore from an older snapshot, the artifact
+    /// does not.
+    async fn verify_revision(&self, rec: &Record) -> Result<(), ErrorCode> {
+        match rec.receipt.revision.as_deref() {
+            None => Ok(()),
+            Some(rev) => match self.artifact_present(rev).await? {
+                true => Ok(()),
+                false => Err(ErrorCode::JournalRepositoryMismatch),
+            },
+        }
+    }
+
     /// Alias of the bound repository.
     pub fn repo_id(&self) -> &str {
         self.inner.binding.repo_id()
@@ -694,12 +707,8 @@ impl FossilWiki {
                 let retryable = rec.receipt.commit_state == types::CommitState::NotCommitted
                     && rec.receipt.retry_action == types::RetryAction::RetrySameOperation;
                 if !retryable {
-                    if let Some(rev) = &rec.receipt.revision {
-                        match self.artifact_present(rev).await {
-                            Ok(true) => {}
-                            Ok(false) => return fail(ErrorCode::JournalRepositoryMismatch),
-                            Err(c) => return fail(c),
-                        }
+                    if let Err(c) = self.verify_revision(&rec).await {
+                        return fail(c);
                     }
                     let ok = rec.receipt.is_success();
                     return receipt_result(rec.receipt, !ok);
@@ -741,7 +750,10 @@ impl FossilWiki {
         };
         match journal.get(&args.0.operation_id) {
             Ok(Some(rec)) if rec.repo_id == self.repo_id() => match self.same_repository(&rec) {
-                Ok(true) => receipt_result(rec.receipt, false),
+                Ok(true) => match self.verify_revision(&rec).await {
+                    Ok(()) => receipt_result(rec.receipt, false),
+                    Err(c) => fail(c),
+                },
                 Ok(false) => fail(ErrorCode::JournalRepositoryMismatch),
                 Err(c) => fail(c),
             },
@@ -776,6 +788,9 @@ impl FossilWiki {
             Ok(false) => return fail(ErrorCode::JournalRepositoryMismatch),
             Err(c) => return fail(c),
         }
+        if let Err(c) = self.verify_revision(&rec).await {
+            return fail(c);
+        }
         if !args.0.retry_publication {
             return receipt_result(rec.receipt, false);
         }
@@ -795,14 +810,9 @@ impl FossilWiki {
         let Ok(_guard) = self.inner.mutation.try_lock() else {
             return fail(ErrorCode::Busy);
         };
-        let present = match rec.receipt.revision.as_deref() {
-            Some(rev) => self.artifact_present(rev).await,
-            None => Ok(false),
-        };
-        match present {
-            Ok(true) => {}
-            Ok(false) => return fail(ErrorCode::JournalRepositoryMismatch),
-            Err(c) => return fail(c),
+        // Re-check under the lock: eligibility already guarantees a revision.
+        if let Err(c) = self.verify_revision(&rec).await {
+            return fail(c);
         }
         let prior = rec.receipt.publication_state;
         let mut rec = rec;

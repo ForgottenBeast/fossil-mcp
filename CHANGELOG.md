@@ -33,8 +33,9 @@ All notable changes to this project are documented here. The project follows
 
 - Receipts are bound to the repository, not only the alias: each journal record keeps
   the Fossil project code and canonical path and is replayed or reconciled only against
-  that repository (`journal_repository_mismatch` otherwise). Replay and sync-only
-  reconcile also verify the recorded artifact exists in the bound repository.
+  that repository (`journal_repository_mismatch` otherwise). Replay, status and
+  every reconcile also verify the recorded artifact exists in the bound repository, so a
+  restore from an older snapshot yields `journal_repository_mismatch`, never `committed`.
   The state-directory `LOCK` serialises writers sharing that directory only; it does
   not coordinate two processes using different state directories on one repository.
 - Publication reconcile combines the retry with the prior receipt: an inconclusive retry
