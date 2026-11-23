@@ -372,3 +372,52 @@ async fn read_only_startup_does_not_open_the_journal() {
     let s = w.wiki_operation_status(status("k1")).await.unwrap();
     assert_eq!(parse(&s).error_code, Some(ErrorCode::WriteDisabled));
 }
+
+#[tokio::test]
+async fn inconclusive_retry_preserves_unknown_publication() {
+    let f = FakeFossil::new();
+    // First sync: the peer may have accepted the artifact, then we time out.
+    f.on("sync", "exec sleep 30");
+    let w = bound(&f, |c| {
+        allow_sync(c);
+        c.sync_deadline = Duration::from_millis(300);
+    })
+    .await;
+    let r = w
+        .write_wiki_page(wargs("k1", "P", "v1", SYNC))
+        .await
+        .unwrap();
+    assert_eq!(
+        parse(&r).receipt.unwrap().publication_state,
+        PublicationState::Unknown
+    );
+    // Retry finds no remote configured: that says nothing about the first try.
+    f.on("sync", "echo 'Usage: fossil sync URL' >&2; exit 1");
+    let r = w
+        .wiki_reconcile_operation(reconcile("k1", true))
+        .await
+        .unwrap();
+    let rc = parse(&r).receipt.unwrap();
+    assert_eq!(rc.publication_state, PublicationState::Unknown);
+    assert_eq!(rc.retry_action, RetryAction::Reconcile);
+    // Zero round trips is equally inconclusive for the first attempt.
+    f.on("sync", "echo 'Round-trips: 0   Artifacts sent: 0'");
+    let r = w
+        .wiki_reconcile_operation(reconcile("k1", true))
+        .await
+        .unwrap();
+    assert_eq!(
+        parse(&r).receipt.unwrap().publication_state,
+        PublicationState::Unknown
+    );
+    // Positive evidence resolves it.
+    f.on("sync", "echo 'Round-trips: 1   Artifacts sent: 1'");
+    let r = w
+        .wiki_reconcile_operation(reconcile("k1", true))
+        .await
+        .unwrap();
+    assert_eq!(
+        parse(&r).receipt.unwrap().publication_state,
+        PublicationState::Confirmed
+    );
+}

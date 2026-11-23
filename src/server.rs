@@ -43,6 +43,7 @@ use binding::{RepositoryBinding, StartupError, WikiConfig};
 use operations::{Journal, JournalError, Record, RepoIdentity, StoredRequest, valid_operation_id};
 use outcome::{
     CommitOutcome, PublishOutcome, ReceiptBase, build_receipt, classify_sync, proc_error_code,
+    resolve_retry,
 };
 use process::{Limits, ProcError, ProcOutput};
 use types::{
@@ -664,6 +665,7 @@ impl FossilWiki {
             Ok(false) => return fail(ErrorCode::JournalRepositoryMismatch),
             Err(c) => return fail(c),
         }
+        let prior = rec.receipt.publication_state;
         let mut rec = rec;
         let base = ReceiptBase {
             repo_id: rec.receipt.repo_id.clone(),
@@ -679,7 +681,7 @@ impl FossilWiki {
         if let Err(c) = self.persist(id, &rec) {
             return fail(c);
         }
-        let published = self.sync().await;
+        let published = resolve_retry(prior, self.sync().await);
         rec.receipt = build_receipt(
             &base,
             Publication::SyncRepository,

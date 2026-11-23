@@ -134,6 +134,22 @@ pub fn build_receipt(
     r
 }
 
+/// Combine the outcome of a publication retry with the receipt state recorded
+/// before it.
+///
+/// Only positive evidence (`Confirmed`) resolves an uncertain publication. A
+/// retry that finds no remote, runs zero round trips or fails to spawn proves
+/// nothing about an earlier attempt that may have reached the peer, so
+/// `Unknown` is preserved. `Pending` stays valid only when no earlier
+/// attempt could have published.
+pub fn resolve_retry(prior: PublicationState, retry: PublishOutcome) -> PublishOutcome {
+    match (prior, retry) {
+        (_, PublishOutcome::Confirmed) => PublishOutcome::Confirmed,
+        (PublicationState::Pending, other) => other,
+        (_, _) => PublishOutcome::Unknown(ErrorCode::PublicationUnconfirmed),
+    }
+}
+
 /// Map a failed child run to an error code (never embeds child bytes).
 pub fn proc_error_code(e: ProcError) -> ErrorCode {
     match e {

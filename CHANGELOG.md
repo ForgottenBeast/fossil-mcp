@@ -35,6 +35,9 @@ All notable changes to this project are documented here. The project follows
   reconcile also verify the recorded artifact exists in the bound repository.
   The state-directory `LOCK` serialises writers sharing that directory only; it does
   not coordinate two processes using different state directories on one repository.
+- Publication reconcile combines the retry with the prior receipt: an inconclusive retry
+  (no remote, zero round trips, spawn failure) keeps `unknown`; only a confirmed sync
+  resolves it. Remote presence of the artifact is not checked.
 
 ### Security
 - Child output, paths and content never reach tool errors.

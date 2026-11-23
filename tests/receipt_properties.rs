@@ -1,6 +1,6 @@
 //! Property tests for the pure outcome -> receipt mapping.
 use fossil_mcp::server::outcome::{
-    CommitOutcome, PublishOutcome, ReceiptBase, build_receipt, classify_sync,
+    CommitOutcome, PublishOutcome, ReceiptBase, build_receipt, classify_sync, resolve_retry,
 };
 use fossil_mcp::server::process::{ProcError, ProcOutput};
 use fossil_mcp::server::types::{
@@ -107,5 +107,51 @@ proptest! {
         Just(ProcError::Spawn), Just(ProcError::Timeout),
         Just(ProcError::OutputLimit), Just(ProcError::Io)]) {
         prop_assert_ne!(classify_sync(Err(e)), PublishOutcome::Confirmed);
+    }
+}
+
+fn inconclusive() -> impl Strategy<Value = PublishOutcome> {
+    prop_oneof![
+        code().prop_map(PublishOutcome::Pending),
+        code().prop_map(PublishOutcome::Unknown),
+    ]
+}
+
+fn state_of(o: &PublishOutcome) -> PublicationState {
+    match o {
+        PublishOutcome::Confirmed => PublicationState::Confirmed,
+        PublishOutcome::Pending(_) => PublicationState::Pending,
+        PublishOutcome::Unknown(_) => PublicationState::Unknown,
+    }
+}
+
+proptest! {
+    /// Over any history of retries: an uncertain publication never becomes
+    /// pending or confirmed through inconclusive attempts, and only a
+    /// positive (confirmed) attempt resolves it.
+    #[test]
+    fn inconclusive_retries_never_downgrade_unknown(
+        history in proptest::collection::vec(
+            prop_oneof![4 => inconclusive().prop_map(Some), 1 => Just(None)], 0..12)
+    ) {
+        let mut state = PublicationState::Unknown;
+        for step in history {
+            let outcome = match step {
+                Some(o) => o,
+                None => PublishOutcome::Confirmed,
+            };
+            let was_unknown = state == PublicationState::Unknown;
+            let next = resolve_retry(state, outcome.clone());
+            if outcome != PublishOutcome::Confirmed {
+                prop_assert_ne!(state_of(&next), PublicationState::Confirmed);
+                if was_unknown {
+                    prop_assert_eq!(state_of(&next), PublicationState::Unknown);
+                }
+            } else {
+                prop_assert_eq!(state_of(&next), PublicationState::Confirmed);
+            }
+            state = state_of(&next);
+            if state == PublicationState::Confirmed { break; }
+        }
     }
 }
