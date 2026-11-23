@@ -37,8 +37,16 @@
 
             platform.buildRustPackage {
               pname = "fossil-mcp";
-              doCheck = false;
-              nativeBuildInputs = with pkgs; [ cmake pkg-config autoPatchelfHook ];
+              # The test suite (unit, integration, stdio, doctests) is the
+              # package gate; it builds throwaway repositories with fossil.
+              doCheck = true;
+              nativeCheckInputs = [ pkgs.fossil ];
+              preCheck = "export HOME=$TMPDIR";
+              nativeBuildInputs = with pkgs; [ cmake pkg-config autoPatchelfHook makeWrapper ];
+              # Pin the runtime: the server finds fossil through this PATH prefix.
+              postInstall = ''
+                wrapProgram $out/bin/fossil-mcp --prefix PATH : ${pkgs.fossil}/bin
+              '';
               buildInputs = with pkgs; [ stdenv.cc.cc.lib openssl ];
               version = "0.1.0";
 
@@ -138,6 +146,8 @@ SCRIPT
             '';
           };
         };
+        # Building the default package runs its check phase (doCheck = true).
+        checks.slice1 = self.packages.${system}.default;
         devShells = {
           default = pkgs.mkShell {
             buildInputs = [
