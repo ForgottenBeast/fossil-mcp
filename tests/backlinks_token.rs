@@ -416,7 +416,7 @@ fn client_sends_bearer_and_accept_and_returns_status_and_body() {
     let s = Secret::new(b"tok-abc".to_vec());
     let r = c.get(&format!("{}/x?y=1", fake.url()), Some(&s)).unwrap();
     assert_eq!(r.status, 200);
-    assert_eq!(r.body, br#"{"a":1}"#);
+    assert_eq!(&r.body[..], br#"{"a":1}"#);
     let req = &fake.requests()[0];
     assert_eq!(req.target, "/x?y=1");
     assert_eq!(req.header("authorization"), Some("Bearer tok-abc"));

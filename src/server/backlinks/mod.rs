@@ -87,14 +87,24 @@ impl Origin {
 /// unreserved characters pass through; everything else is `%XX`).
 pub fn percent_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
+    percent_encode_into(&mut out, s);
+    out
+}
+
+/// Append the percent-encoding of `s` to `out`. No temporary strings are
+/// built, so encoding a secret (the form body's assertion) leaves no copy
+/// other than `out` itself.
+pub fn percent_encode_into(out: &mut String, s: &str) {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
     for b in s.bytes() {
         if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
             out.push(b as char);
         } else {
-            out.push_str(&format!("%{b:02X}"));
+            out.push('%');
+            out.push(HEX[usize::from(b >> 4)] as char);
+            out.push(HEX[usize::from(b & 0x0f)] as char);
         }
     }
-    out
 }
 
 /// The backlinks configuration is not acceptable.

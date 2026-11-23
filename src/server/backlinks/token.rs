@@ -15,7 +15,7 @@ use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 /// A cached token is reused while more than this remains of its lifetime.
 const REFRESH_MARGIN: Duration = Duration::from_secs(60);
@@ -92,7 +92,14 @@ struct AssertionClaims<'a> {
 
 /// Sign the JWT-profile assertion `{iss: userId, sub: userId, aud: issuer,
 /// iat, exp: iat + 300}` with header `{alg: RS256, kid: keyId}`.
-pub fn build_assertion(key: &ZitadelKey, issuer: &str, now_unix: u64) -> Result<String, ErrorCode> {
+///
+/// The result is wiped on drop. Buffers inside the signing library (PEM
+/// decoding, claim serialization) are not reachable from here.
+pub fn build_assertion(
+    key: &ZitadelKey,
+    issuer: &str,
+    now_unix: u64,
+) -> Result<Zeroizing<String>, ErrorCode> {
     let mut header = Header::new(Algorithm::RS256);
     header.kid = Some(key.key_id().to_string());
     let claims = AssertionClaims {
@@ -105,13 +112,23 @@ pub fn build_assertion(key: &ZitadelKey, issuer: &str, now_unix: u64) -> Result<
     let signing_key = EncodingKey::from_rsa_pem(key.private_key_pem().expose())
         .map_err(|_| ErrorCode::CredentialUnavailable)?;
     jsonwebtoken::encode(&header, &claims, &signing_key)
+        .map(Zeroizing::new)
         .map_err(|_| ErrorCode::CredentialUnavailable)
 }
 
+/// The token endpoint's answer. `access_token` is wiped on drop, so every
+/// early return leaves nothing behind (serde_json's own scratch is not
+/// reachable).
 #[derive(Deserialize)]
 struct TokenResponse {
     access_token: Option<String>,
     expires_in: Option<u64>,
+}
+
+impl Drop for TokenResponse {
+    fn drop(&mut self) {
+        self.access_token.zeroize();
+    }
 }
 
 impl TokenCache {
@@ -187,7 +204,7 @@ impl TokenCache {
                 &[
                     ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
                     ("scope", &self.scope),
-                    ("assertion", &assertion),
+                    ("assertion", assertion.as_str()),
                 ],
             )
             .map_err(|e| match e {
@@ -208,8 +225,12 @@ impl TokenCache {
         }
         let mut parsed: TokenResponse =
             serde_json::from_slice(&resp.body).map_err(|_| ErrorCode::BadResponse)?;
-        let (Some(mut token), Some(expires_in)) = (parsed.access_token.take(), parsed.expires_in)
-        else {
+        // Check `expires_in` before taking the token out, so a rejection
+        // leaves the token inside `parsed`, whose Drop wipes it.
+        let Some(expires_in) = parsed.expires_in else {
+            return Err(ErrorCode::BadResponse);
+        };
+        let Some(mut token) = parsed.access_token.take() else {
             return Err(ErrorCode::BadResponse);
         };
         if token.is_empty()
