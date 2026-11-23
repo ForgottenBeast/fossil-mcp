@@ -11,13 +11,26 @@
 //!     --allow-local-writes --state-dir /path/to/private/state
 //! ```
 //!
+//! The optional `wiki_backlinks` tool needs the whole flag group; without it
+//! the tool does not exist. The credential is read from the key file on
+//! every token refresh and is never taken from the environment or an argument.
+//!
+//! ```bash
+//! fossil-mcp --repo-id notes -R /path/to/repo.fossil \
+//!     --backlinks-url https://sidecar.example \
+//!     --backlinks-issuer https://issuer.example \
+//!     --backlinks-key-file /run/secrets/fossil-mcp/notes-key.json \
+//!     --backlinks-audience-scope urn:zitadel:iam:org:project:id:PROJECT:aud
+//! ```
+//!
 //! Logs go to stderr so stdout carries only JSON-RPC.
 
 use anyhow::Result;
 use clap::Parser;
-use fossil_mcp::{FossilWiki, WikiConfig};
+use fossil_mcp::{BacklinksConfig, FossilWiki, WikiConfig};
 use rmcp::ServiceExt;
 use std::path::PathBuf;
+use std::time::Duration;
 use tokio::io::{stdin, stdout};
 
 /// Command-line arguments. Alias and repository are mandatory.
@@ -42,6 +55,27 @@ struct Args {
     /// The fossil executable to run.
     #[arg(long, value_name = "PATH", default_value = "fossil")]
     fossil_bin: PathBuf,
+    /// Origin of this repository's backlinks sidecar (https, no path).
+    #[arg(long, value_name = "URL", requires_all = ["backlinks_issuer", "backlinks_key_file", "backlinks_audience_scope"])]
+    backlinks_url: Option<String>,
+    /// OIDC issuer of the machine user (https, no path).
+    #[arg(long, value_name = "URL", requires_all = ["backlinks_url", "backlinks_key_file", "backlinks_audience_scope"])]
+    backlinks_issuer: Option<String>,
+    /// Zitadel machine-user key file (mode 0600/0640, not a symlink).
+    #[arg(long, value_name = "FILE", requires_all = ["backlinks_url", "backlinks_issuer", "backlinks_audience_scope"])]
+    backlinks_key_file: Option<PathBuf>,
+    /// Audience scope to request besides `openid` (repeatable).
+    #[arg(long, value_name = "SCOPE", requires_all = ["backlinks_url", "backlinks_issuer", "backlinks_key_file"])]
+    backlinks_audience_scope: Vec<String>,
+    /// Deadline of each backlinks HTTP call in milliseconds.
+    #[arg(
+        long,
+        value_name = "MS",
+        default_value_t = 10_000,
+        value_parser = clap::value_parser!(u64).range(1000..=60_000),
+        requires = "backlinks_url"
+    )]
+    backlinks_timeout_ms: u64,
 }
 
 #[tokio::main]
@@ -57,6 +91,19 @@ async fn main() -> Result<()> {
     cfg.allow_local_writes = args.allow_local_writes;
     cfg.allow_repository_sync = args.allow_repository_sync;
     cfg.state_dir = args.state_dir;
+    if let (Some(url), Some(issuer), Some(key_file)) = (
+        args.backlinks_url,
+        args.backlinks_issuer,
+        args.backlinks_key_file,
+    ) {
+        cfg.backlinks = Some(BacklinksConfig {
+            url,
+            issuer,
+            key_file,
+            audience_scopes: args.backlinks_audience_scope,
+            timeout: Duration::from_millis(args.backlinks_timeout_ms),
+        });
+    }
 
     // Validation failure exits here, before any MCP service starts.
     let wiki = FossilWiki::bind(cfg).await?;

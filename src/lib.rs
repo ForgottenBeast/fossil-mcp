@@ -55,7 +55,10 @@
 
 pub mod server;
 
-pub use server::binding::{RepositoryBinding, StartupError, WikiConfig};
+pub use server::binding::{BacklinksConfig, RepositoryBinding, StartupError, WikiConfig};
 pub use server::process::Limits;
-pub use server::types::{ReadWikiPageArgs, ReadWikiPageResponse, WriteReceipt, WriteWikiPageArgs};
+pub use server::types::{
+    ReadWikiPageArgs, ReadWikiPageResponse, WikiBacklinksArgs, WikiBacklinksResponse, WriteReceipt,
+    WriteWikiPageArgs,
+};
 pub use server::{FossilWiki, WriteToolOutput};

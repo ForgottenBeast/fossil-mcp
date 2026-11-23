@@ -7,7 +7,26 @@
 pub mod client;
 pub mod token;
 
+use crate::server::binding::BacklinksConfig;
+use crate::server::secret::FileSecretSource;
+use crate::server::types::{ErrorCode, MAX_PAGE_NAME_BYTES};
+use client::{HttpClient, HttpConfig, HttpError};
+use serde::Deserialize;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use token::TokenCache;
 use ureq::http::Uri;
+
+/// Largest accepted sidecar response (`MAX_PAGES` 20000 x 256-byte names fits).
+const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+/// Largest accepted token endpoint response.
+const MAX_TOKEN_RESPONSE_BYTES: usize = 64 * 1024;
+/// Connect deadline (capped by the per-call deadline).
+const CONNECT_TIMEOUT: Duration = Duration::from_millis(5000);
+/// Accepted per-call deadline range in milliseconds.
+const TIMEOUT_RANGE_MS: std::ops::RangeInclusive<u128> = 1000..=60_000;
+/// The only schema this client understands.
+pub const SCHEMA_VERSION: &str = "backlinks.v1";
 
 /// A validated `scheme://authority` with no path, query, fragment or userinfo.
 ///
@@ -76,4 +95,193 @@ pub fn percent_encode(s: &str) -> String {
         }
     }
     out
+}
+
+/// The backlinks configuration is not acceptable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidConfig;
+
+/// A failed sidecar exchange: a fixed code and, for an unavailable index,
+/// its status (only the two known values are ever carried).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Failure {
+    /// What went wrong.
+    pub code: ErrorCode,
+    /// `updating` or `unavailable` for [`ErrorCode::BacklinksUnavailable`].
+    pub index_status: Option<&'static str>,
+}
+
+impl From<ErrorCode> for Failure {
+    fn from(code: ErrorCode) -> Self {
+        Self {
+            code,
+            index_status: None,
+        }
+    }
+}
+
+/// A validated `backlinks.v1` answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SidecarPage {
+    /// The sidecar's repository id.
+    pub repo_id: String,
+    /// Echo of the requested page.
+    pub page: String,
+    /// Sidecar-side check time (RFC 3339).
+    pub checked_at: String,
+    /// Index generation.
+    pub generation: u64,
+    /// Source pages of all inbound links.
+    pub inbound: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct Wire {
+    schema_version: String,
+    repo_id: String,
+    page: String,
+    status: String,
+    checked_at: String,
+    generation: u64,
+    inbound: Vec<WireRow>,
+}
+
+#[derive(Deserialize)]
+struct WireRow {
+    source_page: String,
+}
+
+#[derive(Deserialize)]
+struct WireUnavailable {
+    status: Option<String>,
+}
+
+/// The sidecar client of one bound repository: fixed origin, token cache,
+/// bounded HTTP. Calls block; run them under `spawn_blocking`.
+#[derive(Debug)]
+pub struct BacklinksService {
+    sidecar: Origin,
+    http: HttpClient,
+    tokens: TokenCache,
+}
+
+impl BacklinksService {
+    /// Validate `cfg` and build the client. Reads no file: the key is read
+    /// when a token is needed, so a rotated key is picked up.
+    pub fn new(cfg: &BacklinksConfig) -> Result<Self, InvalidConfig> {
+        let sidecar = Origin::parse(&cfg.url).map_err(|_| InvalidConfig)?;
+        let issuer = Origin::parse(&cfg.issuer).map_err(|_| InvalidConfig)?;
+        if !TIMEOUT_RANGE_MS.contains(&cfg.timeout.as_millis())
+            || cfg.key_file.as_os_str().is_empty()
+            || cfg.audience_scopes.is_empty()
+            || !cfg.audience_scopes.iter().all(|s| {
+                !s.is_empty() && s.len() <= 256 && s.bytes().all(|b| (0x21..=0x7e).contains(&b))
+            })
+        {
+            return Err(InvalidConfig);
+        }
+        let connect_timeout = CONNECT_TIMEOUT.min(cfg.timeout);
+        let token_http = Arc::new(HttpClient::new(HttpConfig {
+            timeout: cfg.timeout,
+            connect_timeout,
+            max_body: MAX_TOKEN_RESPONSE_BYTES,
+        }));
+        let http = HttpClient::new(HttpConfig {
+            timeout: cfg.timeout,
+            connect_timeout,
+            max_body: MAX_RESPONSE_BYTES,
+        });
+        let tokens = TokenCache::new(
+            Arc::new(FileSecretSource::new(&cfg.key_file)),
+            token_http,
+            issuer,
+            cfg.audience_scopes.clone(),
+        );
+        Ok(Self {
+            sidecar,
+            http,
+            tokens,
+        })
+    }
+
+    /// Fetch the inbound links of `page`. A 401 triggers exactly one forced
+    /// token refresh and one retry.
+    pub fn fetch(&self, page: &str) -> Result<SidecarPage, Failure> {
+        let url = self
+            .sidecar
+            .join(&format!("/v1/backlinks?name={}", percent_encode(page)));
+        let token = self.tokens.get()?;
+        let mut resp = self.get(&url, &token)?;
+        if resp.status == 401 {
+            let fresh = self.tokens.refresh_rejected(&token)?;
+            resp = self.get(&url, &fresh)?;
+            if resp.status == 401 {
+                return Err(ErrorCode::BacklinksAuthFailed.into());
+            }
+        }
+        match resp.status {
+            200 => parse_page(&resp.body),
+            400 => Err(ErrorCode::InvalidArgument.into()),
+            403 => Err(ErrorCode::BacklinksForbidden.into()),
+            404 => Err(ErrorCode::PageNotFound.into()),
+            503 => Err(Failure {
+                code: ErrorCode::BacklinksUnavailable,
+                index_status: unavailable_status(&resp.body),
+            }),
+            500..=599 => Err(ErrorCode::BacklinksUnreachable.into()),
+            _ => Err(ErrorCode::BadResponse.into()),
+        }
+    }
+
+    fn get(&self, url: &str, token: &token::Token) -> Result<client::HttpResponse, Failure> {
+        let started = Instant::now();
+        let resp = self
+            .http
+            .get(url, Some(token.secret()))
+            .map_err(|e| match e {
+                HttpError::Timeout => ErrorCode::Timeout,
+                HttpError::Unreachable => ErrorCode::BacklinksUnreachable,
+                HttpError::TooLarge | HttpError::Protocol => ErrorCode::BadResponse,
+            })?;
+        tracing::debug!(
+            status = resp.status,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "backlinks sidecar answered"
+        );
+        Ok(resp)
+    }
+}
+
+fn unavailable_status(body: &[u8]) -> Option<&'static str> {
+    let w: WireUnavailable = serde_json::from_slice(body).ok()?;
+    match w.status.as_deref() {
+        Some("updating") => Some("updating"),
+        Some("unavailable") => Some("unavailable"),
+        _ => None,
+    }
+}
+
+fn parse_page(body: &[u8]) -> Result<SidecarPage, Failure> {
+    let bad = || Failure::from(ErrorCode::BadResponse);
+    let w: Wire = serde_json::from_slice(body).map_err(|_| bad())?;
+    if w.schema_version != SCHEMA_VERSION
+        || w.status != "current"
+        || w.checked_at.is_empty()
+        || w.checked_at.len() > 64
+        || w.page.is_empty()
+        || w.page.len() > MAX_PAGE_NAME_BYTES
+        || w.repo_id.len() > 64
+        || w.inbound
+            .iter()
+            .any(|r| r.source_page.is_empty() || r.source_page.len() > MAX_PAGE_NAME_BYTES)
+    {
+        return Err(bad());
+    }
+    Ok(SidecarPage {
+        repo_id: w.repo_id,
+        page: w.page,
+        checked_at: w.checked_at,
+        generation: w.generation,
+        inbound: w.inbound.into_iter().map(|r| r.source_page).collect(),
+    })
 }

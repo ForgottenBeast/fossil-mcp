@@ -41,6 +41,7 @@ pub mod process;
 pub mod secret;
 pub mod types;
 
+use backlinks::BacklinksService;
 use binding::{RepositoryBinding, StartupError, WikiConfig};
 use operations::{Journal, JournalError, Record, RepoIdentity, StoredRequest, valid_operation_id};
 use outcome::{
@@ -49,8 +50,10 @@ use outcome::{
 };
 use process::{Limits, ProcError, ProcOutput};
 use types::{
-    ErrorCode, MAX_CONTENT_BYTES, MAX_PAGE_NAME_BYTES, OperationStatusArgs, Publication,
-    ReadWikiPageArgs, ReconcileOperationArgs, WriteReceipt, WriteWikiPageArgs,
+    Backlink, Cursor, DEFAULT_BACKLINKS_LIMIT, ErrorCode, MAX_BACKLINKS_LIMIT, MAX_CONTENT_BYTES,
+    MAX_PAGE_NAME_BYTES, OperationStatusArgs, Publication, ReadWikiPageArgs,
+    ReconcileOperationArgs, WikiBacklinksArgs, WikiBacklinksResponse, WriteReceipt,
+    WriteWikiPageArgs,
 };
 
 /// The highest blob id, read right before our commit starts.
@@ -187,6 +190,8 @@ struct Inner {
     identity: Option<RepoIdentity>,
     mutation: Mutex<()>,
     children: Semaphore,
+    /// Present when the `wiki_backlinks` flag group was supplied.
+    backlinks: Option<Arc<BacklinksService>>,
 }
 
 /// MCP handler for one bound Fossil repository.
@@ -223,6 +228,15 @@ fn receipt_result(receipt: WriteReceipt, as_error: bool) -> Result<CallToolResul
     })
 }
 
+/// Tool error text for a failed sidecar exchange: the fixed text, plus the
+/// index status when the sidecar reported one of its two known values.
+fn backlinks_error(f: backlinks::Failure) -> String {
+    match f.index_status {
+        Some(status) => format!("{} (index status: {status})", text_error(f.code)),
+        None => text_error(f.code),
+    }
+}
+
 fn text_error(code: ErrorCode) -> String {
     let name = serde_json::to_value(code)
         .ok()
@@ -238,6 +252,13 @@ impl FossilWiki {
     /// writes are enabled, the receipt journal can be opened and locked.
     pub async fn bind(cfg: WikiConfig) -> Result<Self, StartupError> {
         let binding = RepositoryBinding::check(&cfg)?;
+        let backlinks = cfg
+            .backlinks
+            .as_ref()
+            .map(BacklinksService::new)
+            .transpose()
+            .map_err(|_| StartupError::InvalidBacklinksConfig)?
+            .map(Arc::new);
         let journal = if cfg.allow_local_writes {
             let dir = cfg
                 .state_dir
@@ -264,9 +285,14 @@ impl FossilWiki {
                 identity: None,
                 mutation: Mutex::new(()),
                 children: Semaphore::new(MAX_ACTIVE_CHILDREN),
+                backlinks,
             }),
             tool_router: Self::tool_router(),
         };
+        // The tool is only routable (listed and callable) when configured.
+        if wiki.inner.backlinks.is_none() {
+            wiki.tool_router.remove_route("wiki_backlinks");
+        }
         match wiki
             .run(
                 &["wiki", "list", "-R", &wiki.repo_arg()],
@@ -667,6 +693,83 @@ impl FossilWiki {
                 }))
             }
         }
+    }
+
+    /// Lists the pages that link to `page`, from the repository's backlinks
+    /// sidecar. Read-only; present only when configured at startup.
+    #[tool(
+        description = "List the wiki pages that link to a page, from the repository's backlinks service (paginated, read-only)",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
+    )]
+    pub async fn wiki_backlinks(
+        &self,
+        args: Parameters<WikiBacklinksArgs>,
+    ) -> Result<Json<WikiBacklinksResponse>, String> {
+        let args = args.0;
+        let limit = args.limit.unwrap_or(DEFAULT_BACKLINKS_LIMIT);
+        let cursor = match args.cursor.as_deref() {
+            None => None,
+            Some(c) => {
+                Some(Cursor::parse(c).ok_or_else(|| text_error(ErrorCode::InvalidArgument))?)
+            }
+        };
+        if !valid_page_name(&args.page) || !(1..=MAX_BACKLINKS_LIMIT).contains(&limit) {
+            return Err(text_error(ErrorCode::InvalidArgument));
+        }
+        let service = self
+            .inner
+            .backlinks
+            .clone()
+            .ok_or_else(|| text_error(ErrorCode::InvalidArgument))?;
+        let page = args.page.clone();
+        let fetched = tokio::task::spawn_blocking(move || service.fetch(&page))
+            .await
+            .map_err(|_| text_error(ErrorCode::BadResponse))?
+            .map_err(backlinks_error)?;
+        if fetched.repo_id != self.repo_id() {
+            return Err(text_error(ErrorCode::BacklinksRepoMismatch));
+        }
+        if fetched.page != args.page {
+            return Err(text_error(ErrorCode::BadResponse));
+        }
+        let total = fetched.inbound.len() as u64;
+        let start = match cursor {
+            None => 0,
+            Some(c) if c.generation != fetched.generation => {
+                return Err(text_error(ErrorCode::CursorStale));
+            }
+            Some(c) if c.offset > total => return Err(text_error(ErrorCode::InvalidArgument)),
+            Some(c) => c.offset,
+        };
+        let end = (start + u64::from(limit)).min(total);
+        let next_cursor = (end < total).then(|| {
+            Cursor {
+                generation: fetched.generation,
+                offset: end,
+            }
+            .to_string()
+        });
+        Ok(Json(WikiBacklinksResponse {
+            schema_version: backlinks::SCHEMA_VERSION.to_string(),
+            repo_id: self.repo_id().to_string(),
+            page: fetched.page,
+            status: "current".to_string(),
+            checked_at: fetched.checked_at,
+            generation: fetched.generation,
+            inbound: fetched.inbound[start as usize..end as usize]
+                .iter()
+                .map(|p| Backlink {
+                    source_page: p.clone(),
+                })
+                .collect(),
+            total_inbound: total,
+            next_cursor,
+        }))
     }
 
     /// Creates or updates a page and returns a typed receipt.

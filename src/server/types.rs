@@ -22,6 +22,85 @@ pub struct ReadWikiPageArgs {
     pub page_name: String,
 }
 
+/// Longest accepted `wiki_backlinks` page size.
+pub const MAX_BACKLINKS_LIMIT: u32 = 200;
+/// Page size when `limit` is omitted.
+pub const DEFAULT_BACKLINKS_LIMIT: u32 = 100;
+
+/// Arguments for the `wiki_backlinks` tool.
+#[derive(Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WikiBacklinksArgs {
+    /// Page whose inbound links are wanted: 1-256 bytes, no NUL/CR/LF, not
+    /// starting with `-`.
+    #[schemars(length(min = 1, max = 256))]
+    pub page: String,
+    /// Opaque cursor from a previous response's `next_cursor`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    /// Rows per page, 1 to 200 (default 100).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1, max = 200))]
+    pub limit: Option<u32>,
+}
+
+/// One inbound link.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct Backlink {
+    /// Name of the page that links to the requested page.
+    pub source_page: String,
+}
+
+/// Response of `wiki_backlinks`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct WikiBacklinksResponse {
+    /// Always `backlinks.v1`.
+    pub schema_version: String,
+    /// Local alias of the bound repository (`--repo-id`).
+    pub repo_id: String,
+    /// The page the links point to.
+    pub page: String,
+    /// Always `current`: anything else is an error.
+    pub status: String,
+    /// When the sidecar last confirmed its index (RFC 3339).
+    pub checked_at: String,
+    /// Index generation; a cursor is only valid within one generation.
+    pub generation: u64,
+    /// This page of inbound links.
+    pub inbound: Vec<Backlink>,
+    /// Number of inbound links over all pages.
+    pub total_inbound: u64,
+    /// Pass as `cursor` for the next page; null on the last page.
+    pub next_cursor: Option<String>,
+}
+
+/// A pagination position: `"<generation>:<offset>"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cursor {
+    /// Index generation the offset refers to.
+    pub generation: u64,
+    /// Number of rows already returned.
+    pub offset: u64,
+}
+
+impl Cursor {
+    /// Parse the canonical text form; anything else is `None`.
+    pub fn parse(s: &str) -> Option<Self> {
+        let (g, o) = s.split_once(':')?;
+        let c = Cursor {
+            generation: g.parse().ok()?,
+            offset: o.parse().ok()?,
+        };
+        (c.to_string() == s).then_some(c)
+    }
+}
+
+impl std::fmt::Display for Cursor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.generation, self.offset)
+    }
+}
+
 /// Response of `list_wiki_pages`.
 #[derive(Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct ListWikiPagesResponse {
@@ -199,6 +278,15 @@ pub enum ErrorCode {
     /// The journal record belongs to a different repository than the bound
     /// one (project code or path differs, or its artifact is absent).
     JournalRepositoryMismatch,
+    /// The pagination cursor belongs to an older index generation; restart
+    /// from the first page.
+    CursorStale,
+    /// The sidecar's index is not current (`updating` or `unavailable`).
+    BacklinksUnavailable,
+    /// The sidecar refused the caller's identity (not on its allowlist).
+    BacklinksForbidden,
+    /// The sidecar answers for a different repository than `--repo-id`.
+    BacklinksRepoMismatch,
     /// The sidecar rejected the credential (after one refresh) or the issuer
     /// refused the grant: key, allowlist or audience need operator action.
     BacklinksAuthFailed,
@@ -231,6 +319,12 @@ impl ErrorCode {
             Self::BadResponse => "unexpected response from fossil",
             Self::JournalRepositoryMismatch => {
                 "the receipt journal belongs to a different repository state"
+            }
+            Self::CursorStale => "the cursor is stale; restart from the first page",
+            Self::BacklinksUnavailable => "the backlinks index is not current; retry shortly",
+            Self::BacklinksForbidden => "the backlinks service refused this identity",
+            Self::BacklinksRepoMismatch => {
+                "the backlinks service answers for a different repository"
             }
             Self::BacklinksAuthFailed => "the backlinks service rejected the credential",
             Self::BacklinksUnreachable => "the backlinks service could not be reached",

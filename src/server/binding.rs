@@ -11,6 +11,23 @@ use crate::server::process::Limits;
 use std::path::PathBuf;
 use std::time::Duration;
 
+/// Fixed startup configuration of the `wiki_backlinks` tool. All fields come
+/// from operator flags; none is reachable from a tool argument.
+#[derive(Debug, Clone)]
+pub struct BacklinksConfig {
+    /// Origin of this repository's sidecar (`https://host[:port]`).
+    pub url: String,
+    /// OIDC issuer (`https://host[:port]`); the token endpoint is
+    /// `<issuer>/oauth/v2/token`.
+    pub issuer: String,
+    /// Path of the Zitadel machine-user key file (never its content).
+    pub key_file: PathBuf,
+    /// Audience scopes requested besides `openid`.
+    pub audience_scopes: Vec<String>,
+    /// Deadline of each HTTP call (1000 to 60000 ms).
+    pub timeout: Duration,
+}
+
 /// Operator-supplied startup configuration.
 #[derive(Debug, Clone)]
 pub struct WikiConfig {
@@ -32,6 +49,9 @@ pub struct WikiConfig {
     pub sync_deadline: Duration,
     /// Journal size cap in bytes.
     pub journal_cap: u64,
+    /// Enables the `wiki_backlinks` tool; absent means the tool is not
+    /// listed and cannot be called.
+    pub backlinks: Option<BacklinksConfig>,
 }
 
 impl WikiConfig {
@@ -47,6 +67,7 @@ impl WikiConfig {
             limits: Limits::default(),
             sync_deadline: Duration::from_secs(30),
             journal_cap: DEFAULT_JOURNAL_CAP,
+            backlinks: None,
         }
     }
 }
@@ -66,6 +87,8 @@ pub enum StartupError {
     StateDirRequired,
     /// The state directory or its lock is unusable.
     StateDirUnavailable,
+    /// The `wiki_backlinks` configuration is invalid.
+    InvalidBacklinksConfig,
 }
 
 impl std::fmt::Display for StartupError {
@@ -80,6 +103,10 @@ impl std::fmt::Display for StartupError {
             Self::StateDirRequired => "--allow-local-writes requires --state-dir",
             Self::StateDirUnavailable => {
                 "state directory is unusable or locked (a stale LOCK needs operator removal)"
+            }
+            Self::InvalidBacklinksConfig => {
+                "invalid backlinks configuration (https origins without a path, at least one \
+                 audience scope, a timeout of 1000-60000 ms)"
             }
         })
     }
