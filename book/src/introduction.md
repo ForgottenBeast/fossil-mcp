@@ -74,10 +74,10 @@ Fossil is a simple, high-reliability, distributed software configuration managem
 
 ## Status
 
-**Current Version**: 0.1.0
-**Status**: Production Ready
-**Test Coverage**: 48/48 tests passing
-**Formal Verification**: TLA+ specs verified with 117,931+ states
+**Current Version**: 0.1.0 (unreleased 0.2.0 contract in progress; see CHANGELOG.md)
+**Status**: Local, owner-operated use only; remote authority and lost-update protection are not implemented
+**Tests**: run `cargo test --locked --all-targets` and `cargo test --locked --doc`
+**Formal Verification**: none for the current code. The historical TLA+ models are retired; see the appendix
 
 ## Getting Started
 

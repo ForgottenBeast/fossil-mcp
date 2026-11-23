@@ -1,5 +1,22 @@
 # TLA+ Specification for fossil-mcp
 
+> **RETIRED - NOT A CERTIFICATION OF THE CURRENT RUST CODE.**
+> The TLA+ models in this repository (`src/WikiSimple.tla`, `src/server/WikiSync.tla`)
+> describe an earlier `success`/`sync_status`/`force_write` design that no longer
+> exists. Bounded model checking is not a proof of the Rust implementation, and no
+> state count below describes it. At this snapshot `WikiSync.tla` instantiates a
+> module whose variables differ (it is broken/unvalidated); `WikiSimple` has
+> `SyncSuccess` requiring equality while transferring no content, `ResolveLocal`
+> copying remote to local, an `EventualIdleIfNoPending` that starts with nothing
+> pending, and fairness on the whole `Next` rather than on each recovery action.
+> The Rust server makes **no** automatic-retry, force-overwrite or compare-and-swap
+> guarantee; remote CAS is a separate gate. What is actually asserted today is
+> listed in [Current invariant-to-test correspondence](TLA_SPECIFICATION.md#current-invariant-to-test-correspondence).
+> No current TLA model covers receipts or idempotency.
+
+## Historical content (not current)
+
+
 ## Overview
 
 This directory contains a TLA+ (Temporal Logic of Actions) specification for the fossil-mcp wiki page synchronization system. The specification provides a formal model of the system's behavior and enables verification of critical properties.
@@ -321,3 +338,25 @@ For questions about this specification:
 - Reference the code implementation in src/server/sync.rs
 - Reference type definitions in src/server/types.rs
 - Review test cases in tests/fossil_wiki_integration.rs
+
+
+## Current invariant-to-test correspondence
+
+These are the guarantees the Rust code is tested for. They are executable
+tests, not model-checking results.
+
+| Invariant | Executable test |
+|---|---|
+| Page bytes reach fossil via stdin; no shared temp file; `A/B` and `A_B` do not alias | `tests/write_input_properties.rs::stdin_isolation`, `tests/process_lifecycle.rs::write_uses_stdin_not_page_path` |
+| Children are bounded and reaped on timeout, cancel and output cap | `tests/process_lifecycle.rs::timeout_reaps_child`, `cancel_reaps_child`, `stdout_limit_reaps_child` |
+| Binding is fixed at startup and cannot be retargeted by a request | `tests/repository_binding.rs::binding_cannot_change_through_requests`, `two_repositories_are_isolated`, `tests/mcp_stdio.rs::startup_requires_binding` |
+| No credential fields; retired tools are not routable | `tests/mcp_stdio.rs::catalog_is_stable_and_credential_free` |
+| Outcomes are monotonic: confirmed publication implies committed; unknown never becomes not_committed | `tests/receipt_properties.rs::receipt_invariants` |
+| A later sync failure keeps the local commit and its revision | `tests/write_outcomes.rs::no_remote_keeps_commit_and_is_pending`, `sync_timeout_is_unknown_not_unpublished` |
+| fossil's exit 0 on a wrong-project peer is not read as confirmed | `tests/fossil_wiki_integration.rs::real_sync_with_wrong_project_peer_is_not_confirmed` |
+| No blind retry: same key replays; sync retry never re-commits; unknown survives restart | `tests/operation_recovery.rs::same_key_same_request_no_second_commit`, `sync_retry_never_calls_commit`, `restart_after_unknown_never_blindly_commits` |
+| Journal fails closed on corruption, cap, stale lock | `tests/operation_recovery.rs::corrupt_journal_fails_closed`, `journal_cap_refuses_writes_instead_of_evicting`, `stale_lock_and_bad_state_dir_fail_startup` |
+
+Not covered (deferred to the remote authority / CAS gate): lost-update
+protection against concurrent writers, browser edits and sync imports. A
+process mutex and a pre-flight read are not compare-and-swap.
