@@ -18,6 +18,11 @@ ureq = { version = "3", default-features = false, features = ["rustls", "json"] 
 jsonwebtoken = { version = "10", default-features = false, features = ["rust_crypto", "use_pem"] }
 zeroize = "1"
 base64 = "0.23"
+# Compile-time cap: ureq-proto logs raw request bytes (bearer, assertion) at
+# TRACE and ureq logs headers at DEBUG, with no feature to turn that off.
+# `max_level_info` makes every log! below INFO a no-op in the whole build, so
+# the cap holds for any logger an embedding application installs.
+log = { version = "0.4", features = ["max_level_info"] }
 
 [dev-dependencies]
 proptest = "1.4"
