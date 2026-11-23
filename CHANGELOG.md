@@ -47,8 +47,10 @@ All notable changes to this project are documented here. The project follows
   wiki body equals the written bytes wins. A concurrent writer, whatever its parent, is
   never returned; zero or several matches (including a same-bytes writer racing our
   commit) give `revision_unresolved`. No baseline means no commit (`preflight_failed`).
-- Every `fossil` child runs in its own process group and the whole group is killed on
-  deadline, output overflow and cancellation, so forked descendants no longer outlive them.
+- Every `fossil` child runs in its own process group and the whole group is killed when the
+  call ends (exit, deadline, output overflow, cancellation), so forked descendants no longer
+  outlive it. The leader is watched through a pidfd and reaped only after the group was
+  signalled, so a recycled pid is never signalled (Linux 5.3+).
 
 ### Security
 - Child output, paths and content never reach tool errors.

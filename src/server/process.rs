@@ -2,15 +2,19 @@
 //!
 //! Every child gets: piped stdin (closed after the payload), concurrent capped
 //! stdout/stderr drains, one wall-clock deadline covering write + wait, and
-//! its own process group that is killed as a whole on timeout, output
-//! overflow and cancellation, so descendants cannot outlive the deadline. Callers never see raw child bytes
-//! in an error; they get a [`ProcError`] kind.
+//! its own process group that is killed as a whole when the call ends (normal
+//! exit, timeout, output overflow, cancellation), so descendants cannot
+//! outlive it. The leader is observed through a pidfd and reaped only after
+//! the group was signalled, so a recycled pid is never signalled. Callers
+//! never see raw child bytes in an error; they get a [`ProcError`] kind.
 
 use std::ffi::OsString;
+use std::os::fd::{FromRawFd, OwnedFd};
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use tokio::io::unix::AsyncFd;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, Interest};
 use tokio::process::Command;
 
 /// Bounds applied to every `fossil` child.
@@ -80,20 +84,87 @@ async fn drain<R: AsyncRead + Unpin>(mut r: R, max: usize) -> Result<Vec<u8>, Pr
     }
 }
 
+/// Test instrumentation: every group signal and whether its leader was still
+/// unreaped at that moment. Off unless [`kill_log::enable`] is called.
+#[doc(hidden)]
+pub mod kill_log {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// One group-signal decision.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct GroupKill {
+        /// The process group (= the leader's pid).
+        pub pgid: i32,
+        /// The leader had not been reaped when the signal was decided.
+        pub leader_unreaped: bool,
+    }
+
+    static ON: AtomicBool = AtomicBool::new(false);
+    static LOG: Mutex<Vec<GroupKill>> = Mutex::new(Vec::new());
+
+    /// Start recording (process-wide).
+    pub fn enable() {
+        ON.store(true, Ordering::SeqCst);
+    }
+
+    pub(super) fn record(k: GroupKill) {
+        if ON.load(Ordering::SeqCst) {
+            LOG.lock().unwrap_or_else(|e| e.into_inner()).push(k);
+        }
+    }
+
+    /// Recorded decisions for one process group.
+    pub fn of(pgid: i32) -> Vec<GroupKill> {
+        LOG.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|k| k.pgid == pgid)
+            .copied()
+            .collect()
+    }
+}
+
+/// SIGKILL the group `pgid`, but only while its leader is still unreaped.
+///
+/// The group id is the leader's pid. While the leader is a running process or
+/// an unreaped zombie that number cannot be handed to anyone else, so the
+/// signal can only reach our own group. After the leader is reaped it could
+/// be reused, so nothing is sent. `waitid(WNOWAIT)` observes without reaping.
+fn kill_group(pgid: i32) {
+    // SAFETY: waitid writes into a zeroed siginfo we own; killpg takes ints.
+    let unreaped = unsafe {
+        let mut info: libc::siginfo_t = std::mem::zeroed();
+        libc::waitid(
+            libc::P_PID,
+            pgid as libc::id_t,
+            &mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        ) == 0
+    };
+    kill_log::record(kill_log::GroupKill {
+        pgid,
+        leader_unreaped: unreaped,
+    });
+    if unreaped {
+        // SAFETY: plain syscall; an emptied group just yields ESRCH.
+        unsafe {
+            libc::killpg(pgid, libc::SIGKILL);
+        }
+    }
+}
+
 /// Kills the child's whole process group when dropped while still armed.
 ///
-/// The group id equals the child's pid; the child stays unreaped (a zombie
-/// at worst) until the group is signalled, so the id cannot have been reused.
+/// Armed from spawn until [`run`] has signalled the group itself, during
+/// which time nothing reaps the leader (only `child.wait()` does, and it runs
+/// strictly afterwards), so cancellation always hits an unreaped leader.
 struct GroupGuard(Option<i32>);
 
 impl GroupGuard {
     fn kill(&mut self) {
         if let Some(pgid) = self.0.take() {
-            // SAFETY: plain syscall with integer arguments; a stale or
-            // absent group just yields ESRCH.
-            unsafe {
-                libc::killpg(pgid, libc::SIGKILL);
-            }
+            kill_group(pgid);
         }
     }
 }
@@ -104,7 +175,23 @@ impl Drop for GroupGuard {
     }
 }
 
+/// Opens a pidfd for `pid`; it becomes readable when the process exits, and
+/// waiting on it does not reap the process.
+fn pidfd(pid: i32) -> std::io::Result<AsyncFd<OwnedFd>> {
+    // SAFETY: pidfd_open takes integers; on success the fd is ours alone.
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: `fd` is a fresh, valid descriptor returned above.
+    let owned = unsafe { OwnedFd::from_raw_fd(fd as i32) };
+    AsyncFd::with_interest(owned, Interest::READABLE)
+}
+
 /// Run `bin args…` with `stdin` bytes under `limits`.
+///
+/// The leader is observed (pidfd) but not reaped until the whole group has
+/// been signalled, so a numeric group id is never signalled after reuse.
 pub async fn run(
     bin: &Path,
     args: &[OsString],
@@ -124,7 +211,17 @@ pub async fn run(
         .process_group(0)
         .spawn()
         .map_err(|_| ProcError::Spawn)?;
+    // Declared after `child`, so it drops first: the group is signalled
+    // while the leader is still unreaped, then the child is reaped.
     let mut guard = GroupGuard(child.id().and_then(|p| i32::try_from(p).ok()));
+    let exited = match guard.0.map(pidfd) {
+        Some(Ok(fd)) => fd,
+        _ => {
+            guard.kill();
+            let _ = child.wait().await;
+            return Err(ProcError::Io);
+        }
+    };
 
     let mut child_stdin = child.stdin.take();
     let out = child.stdout.take().expect("stdout piped");
@@ -139,27 +236,39 @@ pub async fn run(
             }
             Ok::<(), ProcError>(())
         };
-        let (_, so, se, status) = tokio::try_join!(
+        let (_, so, se, _) = tokio::try_join!(
             write,
             drain(out, limits.stdout_max),
             drain(err, limits.stderr_max),
-            async { child.wait().await.map_err(|_| ProcError::Io) },
+            async {
+                exited
+                    .readable()
+                    .await
+                    .map(|_| ())
+                    .map_err(|_| ProcError::Io)
+            },
         )?;
-        Ok::<ProcOutput, ProcError>(ProcOutput {
-            code: status.code(),
-            stdout: so,
-            stderr: se,
-        })
+        Ok::<_, ProcError>((so, se))
     };
 
     let res = match tokio::time::timeout(limits.deadline, io).await {
         Ok(r) => r,
         Err(_) => Err(ProcError::Timeout),
     };
-    if res.is_err() {
-        guard.kill(); // the whole group first, while the child is unreaped
-        let _ = child.kill().await; // then kill + reap on every known error path
-    }
-    guard.0 = None; // finished normally: nothing left to signal
-    res
+    // Every path ends the same way: the leader is still unreaped here, so
+    // signal the whole group (descendants included), then reap the leader.
+    guard.kill();
+    let status = match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
+        Ok(Ok(s)) => s,
+        _ => {
+            let _ = child.start_kill();
+            return Err(res.err().unwrap_or(ProcError::Io));
+        }
+    };
+    let (stdout, stderr) = res?;
+    Ok(ProcOutput {
+        code: status.code(),
+        stdout,
+        stderr,
+    })
 }
