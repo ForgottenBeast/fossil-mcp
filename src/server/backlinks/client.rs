@@ -111,7 +111,11 @@ pub(crate) fn bearer_header(token: &Secret) -> Result<HeaderValue, HttpError> {
     let mut raw = Zeroizing::new(Vec::with_capacity(7 + token.expose().len()));
     raw.extend_from_slice(b"Bearer ");
     raw.extend_from_slice(token.expose());
-    let mut value = HeaderValue::from_bytes(&raw).map_err(|_| HttpError::Protocol)?;
+    // The header value takes over the wiping buffer itself: `from_bytes` would
+    // copy it into a fresh allocation that is freed unwiped. A rejected value
+    // (CR/LF or other invalid bytes) drops the owner, which wipes it.
+    let mut value =
+        HeaderValue::from_maybe_shared(Bytes::from_owner(raw)).map_err(|_| HttpError::Protocol)?;
     value.set_sensitive(true);
     Ok(value)
 }
@@ -153,8 +157,11 @@ impl HttpClient {
     pub fn post_form(&self, url: &str, fields: &[(&str, &str)]) -> Result<HttpResponse, HttpError> {
         // The body carries the signed assertion. It is built in one buffer
         // sized for the worst case (every byte `%XX`) so it never reallocates
-        // and leaves a stale copy behind, and it is wiped when this returns.
-        // hyper copies it once more into its send buffer (not reachable).
+        // and leaves a stale copy behind. That same buffer is handed to hyper
+        // as the request body (`Bytes::from_owner`), so no second copy is made
+        // here and it is wiped when the last reference to it is dropped. What
+        // hyper copies into its own write buffer is not reachable from this
+        // crate and is an accepted gap.
         let cap: usize = fields
             .iter()
             .map(|(k, v)| 3 * (k.len() + v.len()) + 2)
@@ -173,7 +180,7 @@ impl HttpClient {
             url,
             authorization: None,
             content_type: Some("application/x-www-form-urlencoded"),
-            body: Bytes::copy_from_slice(body.as_bytes()),
+            body: Bytes::from_owner(Zeroizing::new(std::mem::take(&mut *body).into_bytes())),
         })
     }
 

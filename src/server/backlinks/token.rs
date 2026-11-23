@@ -136,6 +136,10 @@ impl Drop for WipedDer {
 /// is held in a [`WipedDer`], so it is wiped as soon as ring has parsed it;
 /// ring keeps the parsed key and has no wipe hook, and the base64 text is the
 /// PEM already held (and wiped) by the caller's secret.
+///
+/// Accepted gap inside rustls-pki-types' PEM decoder: it keeps base64 scratch
+/// that is freed unwiped, and on malformed input it can free a partially
+/// decoded DER unwiped. Neither buffer is reachable from this crate.
 fn signing_key(pem: &[u8]) -> Result<RsaKeyPair, ErrorCode> {
     let der =
         WipedDer(PrivateKeyDer::from_pem_slice(pem).map_err(|_| ErrorCode::CredentialUnavailable)?);

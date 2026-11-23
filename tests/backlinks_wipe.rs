@@ -25,15 +25,18 @@ const TOKEN: &[u8] = b"REVIEW10-TOKEN-SENTINEL-0123456789abcdef";
 struct Needle {
     ptr: AtomicPtr<u8>,
     len: AtomicUsize,
-    /// `true`: a block must have exactly this size; `false`: at least.
-    exact: AtomicUsize,
+    /// Non-zero: a block must have exactly this size; zero: at least `len`.
+    size: AtomicUsize,
+    /// Non-zero: count only blocks freed on the thread that armed the probe.
+    local: AtomicUsize,
     hits: AtomicUsize,
 }
 
 static NEEDLE: Needle = Needle {
     ptr: AtomicPtr::new(std::ptr::null_mut()),
     len: AtomicUsize::new(0),
-    exact: AtomicUsize::new(0),
+    size: AtomicUsize::new(0),
+    local: AtomicUsize::new(0),
     hits: AtomicUsize::new(0),
 };
 
@@ -45,7 +48,9 @@ unsafe impl GlobalAlloc for Probe {
     }
     unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
         let n = NEEDLE.len.load(Ordering::SeqCst);
-        if n != 0 && l.size() >= n && (NEEDLE.exact.load(Ordering::SeqCst) == 0 || l.size() == n) {
+        let size = NEEDLE.size.load(Ordering::SeqCst);
+        let here = NEEDLE.local.load(Ordering::SeqCst) == 0 || ARMED_HERE.with(|c| c.get());
+        if n != 0 && here && l.size() >= n && (size == 0 || l.size() == size) {
             let want = unsafe { std::slice::from_raw_parts(NEEDLE.ptr.load(Ordering::SeqCst), n) };
             let have = unsafe { std::slice::from_raw_parts(p, n) };
             if want == have {
@@ -59,13 +64,34 @@ unsafe impl GlobalAlloc for Probe {
 #[global_allocator]
 static ALLOC: Probe = Probe;
 
+thread_local! {
+    /// Set on the thread that armed a thread-local probe.
+    static ARMED_HERE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 static SERIAL: Mutex<()> = Mutex::new(());
 
-/// Count freed blocks holding `needle` while `f` runs. `needle` must outlive
-/// the call and must not itself be freed inside `f`.
+/// Count freed blocks starting with `needle` while `f` runs. `needle` must
+/// outlive the call and must not itself be freed inside `f`. `exact`: only
+/// blocks of exactly the needle's length count; otherwise any block at least
+/// that long.
 fn unwiped_copies(needle: &[u8], exact: bool, f: impl FnOnce()) -> usize {
+    probe(needle, exact.then_some(needle.len()), false, f)
+}
+
+/// As [`unwiped_copies`], with the required block size given explicitly
+/// (`None`: at least the needle's length), counting only blocks freed on the
+/// calling thread. The calls under test run on that thread, while the fake
+/// server's own copy of the request is freed on its thread.
+fn unwiped_blocks(needle: &[u8], size: Option<usize>, f: impl FnOnce()) -> usize {
+    probe(needle, size, true, f)
+}
+
+fn probe(needle: &[u8], size: Option<usize>, local: bool, f: impl FnOnce()) -> usize {
+    ARMED_HERE.with(|c| c.set(local));
+    NEEDLE.local.store(usize::from(local), Ordering::SeqCst);
     NEEDLE.hits.store(0, Ordering::SeqCst);
-    NEEDLE.exact.store(usize::from(exact), Ordering::SeqCst);
+    NEEDLE.size.store(size.unwrap_or(0), Ordering::SeqCst);
     NEEDLE
         .ptr
         .store(needle.as_ptr() as *mut u8, Ordering::SeqCst);
@@ -167,6 +193,70 @@ fn private_key_der_is_wiped_on_every_exit() {
         assert!(check_signing_key(&bad_key).is_err());
     });
     assert_eq!(rejected, 0, "unwiped DER copies on the error exit");
+}
+
+/// P2c: the crate makes no unwiped copy of the assertion form body or of the
+/// `Bearer <token>` header value. hyper's own write buffer still holds both
+/// until it is freed: that is the accepted gap, so only blocks attributable to
+/// this crate are counted: for the body, the exact-length copy the old
+/// `Bytes::copy_from_slice` made and the worst-case-sized build buffer; for
+/// the header, the exact-length `from_bytes` copy of the `Bearer ` value.
+/// hyper's buffer holds the request head too, so it matches neither size.
+#[test]
+fn form_body_and_bearer_header_have_no_unwiped_crate_copies() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let fake = fake_http::Fake::start(|_, _| fake_http::Reply::json(200, json!({})));
+    let client = HttpClient::new(HttpConfig {
+        timeout: Duration::from_secs(5),
+        connect_timeout: Duration::from_secs(2),
+        max_body: 65536,
+    });
+    let url = fake.url();
+
+    // Fields that need escaping, so the encoded length differs from the
+    // worst-case capacity and the two sizes are distinct.
+    let fields = [
+        ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
+        (
+            "assertion",
+            "BODY-SENTINEL-0123456789.abcdefghijklmnop.QRSTUVWXYZ",
+        ),
+    ];
+    let expected = "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer\
+                    &assertion=BODY-SENTINEL-0123456789.abcdefghijklmnop.QRSTUVWXYZ";
+    let cap: usize = fields
+        .iter()
+        .map(|(k, v)| 3 * (k.len() + v.len()) + 2)
+        .sum();
+    assert_ne!(cap, expected.len());
+    let mut status = 0;
+    let exact = unwiped_blocks(expected.as_bytes(), Some(expected.len()), || {
+        status = client.post_form(&url, &fields).unwrap().status;
+    });
+    assert_eq!(status, 200);
+    let sized = unwiped_blocks(expected.as_bytes(), Some(cap), || {
+        client.post_form(&url, &fields).unwrap();
+    });
+    assert_eq!(exact, 0, "unwiped exact-length copies of the form body");
+    assert_eq!(
+        sized, 0,
+        "unwiped worst-case-sized buffers of the form body"
+    );
+    assert_eq!(
+        std::str::from_utf8(&fake.requests().last().unwrap().body).unwrap(),
+        expected
+    );
+
+    let bearer = format!("Bearer {}", std::str::from_utf8(TOKEN).unwrap());
+    let secret = Secret::new(TOKEN.to_vec());
+    let header = unwiped_blocks(bearer.as_bytes(), Some(bearer.len()), || {
+        client.get(&url, Some(&secret)).unwrap();
+    });
+    assert_eq!(header, 0, "unwiped copies of the bearer header value");
+    assert_eq!(
+        fake.requests().last().unwrap().header("authorization"),
+        Some(bearer.as_str())
+    );
 }
 
 fn b64(data: &[u8]) -> String {

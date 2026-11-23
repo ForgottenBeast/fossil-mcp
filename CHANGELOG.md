@@ -39,8 +39,10 @@ All notable changes to this project are documented here. The project follows
   server with a pathless message) and still read again on every refresh. Token responses
   with `expires_in` of 60 s or less are `backlinks_auth_failed`. `checked_at` must be a valid
   RFC 3339 timestamp. `timeout` and `bad_response` from the backlinks path carry
-  backlinks-specific fixed messages (codes unchanged). The assertion, the form body and token
-  response bodies are held in wiping buffers. No HTTP crate in the build can log request bytes: the client
+  backlinks-specific fixed messages (codes unchanged). The assertion, the form body (the
+  same buffer is the request body, no second copy), the `Bearer` header value and token
+  response bodies are held in wiping buffers; hyper's own write buffer and the PEM decoder's
+  scratch inside `rustls-pki-types` are not reachable and remain an accepted gap. No HTTP crate in the build can log request bytes: the client
   is hyper without its unstable `tracing` feature and rustls without `logging` (a replaced
   `ureq` wrote raw request bytes, including the bearer, at TRACE through `log`, which a
   downstream `release_max_level_trace` would have turned back on; tests pin the lockfile and
