@@ -806,3 +806,65 @@ async fn sidecar_answer_with_an_invalid_checked_at_is_bad_response() {
         );
     }
 }
+
+// ---- messages name the backlinks path, not fossil ----------------------------------
+
+#[tokio::test]
+async fn timeout_and_bad_response_messages_are_backlinks_specific() {
+    // Codes are unchanged; the fixed text must not blame the fossil binary,
+    // and must not carry URLs, headers or body text.
+    let e = env(
+        |_, _| Reply::Stall {
+            status: 200,
+            stall: Duration::from_secs(5),
+        },
+        3600,
+    );
+    let w = wiki(&e, 1000).await;
+    let err = assert_code(
+        call(&w, args("Target", None, None)).await,
+        ErrorCode::Timeout,
+    );
+    assert_eq!(err, "timeout: the backlinks request timed out");
+
+    for body in [json!({"junk": true}), json!("text")] {
+        let e = env(move |_, _| Reply::json(200, body.clone()), 3600);
+        let w = wiki(&e, 5000).await;
+        let err = assert_code(
+            call(&w, args("Target", None, None)).await,
+            ErrorCode::BadResponse,
+        );
+        assert_eq!(
+            err,
+            "bad_response: unexpected response from the backlinks service"
+        );
+    }
+
+    // A well-formed answer for another page is also a bad response.
+    let e = env(
+        |_, _| {
+            let mut b = page_body(json!([]));
+            b["page"] = json!("Other");
+            Reply::json(200, b)
+        },
+        3600,
+    );
+    let w = wiki(&e, 5000).await;
+    let err = assert_code(
+        call(&w, args("Target", None, None)).await,
+        ErrorCode::BadResponse,
+    );
+    assert!(!err.contains("fossil"), "{err}");
+    for banned in ["http", "127.0.0.1", "Bearer", "SENTINEL"] {
+        assert!(!err.contains(banned), "{err}");
+    }
+}
+
+#[test]
+fn fossil_command_messages_are_unchanged() {
+    assert_eq!(ErrorCode::Timeout.message(), "the fossil command timed out");
+    assert_eq!(
+        ErrorCode::BadResponse.message(),
+        "unexpected response from fossil"
+    );
+}

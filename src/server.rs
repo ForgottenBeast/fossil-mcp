@@ -233,9 +233,24 @@ fn receipt_result(receipt: WriteReceipt, as_error: bool) -> Result<CallToolResul
 /// index status when the sidecar reported one of its two known values.
 fn backlinks_error(f: backlinks::Failure) -> String {
     match f.index_status {
-        Some(status) => format!("{} (index status: {status})", text_error(f.code)),
-        None => text_error(f.code),
+        Some(status) => format!("{} (index status: {status})", backlinks_text_error(f.code)),
+        None => backlinks_text_error(f.code),
     }
+}
+
+/// [`text_error`] for the backlinks path. `timeout` and `bad_response` keep
+/// their codes, but their shared messages talk about the fossil command, which
+/// is wrong here: say what failed without any URL, header or body text.
+fn backlinks_text_error(code: ErrorCode) -> String {
+    let message = match code {
+        ErrorCode::Timeout => "the backlinks request timed out",
+        ErrorCode::BadResponse => "unexpected response from the backlinks service",
+        other => return text_error(other),
+    };
+    let name = serde_json::to_value(code)
+        .ok()
+        .and_then(|v| v.as_str().map(String::from));
+    format!("{}: {message}", name.unwrap_or_default())
 }
 
 fn text_error(code: ErrorCode) -> String {
@@ -733,13 +748,13 @@ impl FossilWiki {
         let page = args.page.clone();
         let fetched = tokio::task::spawn_blocking(move || service.fetch(&page))
             .await
-            .map_err(|_| text_error(ErrorCode::BadResponse))?
+            .map_err(|_| backlinks_text_error(ErrorCode::BadResponse))?
             .map_err(backlinks_error)?;
         if fetched.repo_id != self.repo_id() {
             return Err(text_error(ErrorCode::BacklinksRepoMismatch));
         }
         if fetched.page != args.page {
-            return Err(text_error(ErrorCode::BadResponse));
+            return Err(backlinks_text_error(ErrorCode::BadResponse));
         }
         let total = fetched.inbound.len() as u64;
         let start = match cursor {
