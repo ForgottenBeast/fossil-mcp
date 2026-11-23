@@ -118,6 +118,7 @@ pub mod server;
 
 // Re-export commonly used types for convenience
 pub use server::FossilWiki;
+pub use server::process::Limits;
 pub use server::types::{
     AuthenticateWikiArgs, AuthenticateWikiResponse, ConfigureRepositoryArgs,
     ConfigureRepositoryResponse, ReadWikiPageArgs, ReadWikiPageResponse, SearchWikiArgs,

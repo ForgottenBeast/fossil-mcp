@@ -15,8 +15,8 @@ pub enum SyncError {
 }
 
 /// Executes 'fossil sync' and parses errors into appropriate SyncError variants
-pub async fn sync_repository(repository_path: &PathBuf) -> Result<(), SyncError> {
-    let output = Command::new("fossil")
+pub async fn sync_repository(fossil_bin: &PathBuf, repository_path: &PathBuf) -> Result<(), SyncError> {
+    let output = Command::new(fossil_bin)
         .args(["sync", "-R", &repository_path.to_string_lossy()])
         .output()
         .await

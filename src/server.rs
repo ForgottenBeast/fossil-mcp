@@ -45,6 +45,9 @@ use sync::{sync_repository, SyncError};
 
 pub mod types;
 
+pub use process::Limits;
+pub mod process;
+
 /// Parses the output of `fossil wiki list` into a vector of page names.
 ///
 /// Filters out empty lines and trims whitespace from each page name.
@@ -107,6 +110,8 @@ pub fn parse_wiki_list(output: &str) -> Vec<String> {
 #[derive(Clone)]
 pub struct FossilWiki {
     repository: Arc<RwLock<Option<PathBuf>>>,
+    fossil_bin: PathBuf,
+    limits: Limits,
     tool_router: ToolRouter<Self>,
 }
 
@@ -134,8 +139,22 @@ impl FossilWiki {
     pub fn new(path: Option<PathBuf>) -> Self {
         Self {
             repository: Arc::new(RwLock::new(path)),
+            fossil_bin: PathBuf::from("fossil"),
+            limits: Limits::default(),
             tool_router: Self::tool_router(),
         }
+    }
+
+    /// Use a specific `fossil` executable (operator configuration and test seam).
+    pub fn with_fossil_bin(mut self, bin: impl Into<PathBuf>) -> Self {
+        self.fossil_bin = bin.into();
+        self
+    }
+
+    /// Override subprocess budgets.
+    pub fn with_limits(mut self, limits: Limits) -> Self {
+        self.limits = limits;
+        self
     }
 
     /// Get the current repository path.
@@ -275,7 +294,7 @@ impl FossilWiki {
     pub async fn list_wiki_pages(&self) -> Result<Json<types::ListWikiPagesResponse>, String> {
         let repo_path = self.get_repository()?;
 
-        let output = Command::new("fossil")
+        let output = Command::new(&self.fossil_bin)
             .args(["wiki", "-R", &repo_path.to_string_lossy(), "list"])
             .output()
             .await
@@ -348,7 +367,7 @@ impl FossilWiki {
     ) -> Result<Json<types::ReadWikiPageResponse>, String> {
         let repo_path = self.get_repository()?;
 
-        let output = Command::new("fossil")
+        let output = Command::new(&self.fossil_bin)
             .args(["wiki", "-R", &repo_path.to_string_lossy(), "export", &args.0.page_name])
             .output()
             .await
@@ -433,7 +452,7 @@ impl FossilWiki {
             .map_err(|e| format!("Failed to write temporary file: {}", e))?;
 
         // Try "create" first, then "commit" if it fails (for existing pages)
-        let mut cmd = Command::new("fossil");
+        let mut cmd = Command::new(&self.fossil_bin);
         cmd.args(["wiki", "-R", &repo_path.to_string_lossy(), "create", &args.0.page_name, &temp_file]);
 
         if let Some(ref mt) = args.0.mimetype {
@@ -450,7 +469,7 @@ impl FossilWiki {
         if !final_output.status.success() {
             let stderr_str = String::from_utf8_lossy(&final_output.stderr);
             if stderr_str.contains("already exists") || stderr_str.contains("exists") {
-                let mut cmd = Command::new("fossil");
+                let mut cmd = Command::new(&self.fossil_bin);
                 cmd.args(["wiki", "-R", &repo_path.to_string_lossy(), "commit", &args.0.page_name, &temp_file]);
 
                 if let Some(ref mt) = args.0.mimetype {
@@ -475,7 +494,7 @@ impl FossilWiki {
         // Handle synchronization if requested
         let mut sync_status = None;
         if !args.0.skip_sync {
-            match sync_repository(&repo_path).await {
+            match sync_repository(&self.fossil_bin, &repo_path).await {
                 Ok(()) => {
                     sync_status = Some(types::SyncStatus {
                         attempted: true,

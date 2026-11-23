@@ -1,0 +1,155 @@
+//! Shared fixtures: fake `fossil` executables and throwaway real repositories.
+//! Nothing here touches a real wiki; every path lives under a `TempDir`.
+#![allow(dead_code)]
+
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
+
+/// A scripted stand-in for the `fossil` binary.
+///
+/// It records argv/stdin of every call under `calls/`, keeps one page's
+/// head/parent revision, and runs an optional `on_<subcommand>` snippet
+/// (sourced by `sh`) so tests can inject faults deterministically.
+pub struct FakeFossil {
+    pub dir: tempfile::TempDir,
+    pub bin: PathBuf,
+}
+
+const SCRIPT: &str = r#"#!/bin/sh
+D="__DIR__"
+id=$$
+mkdir -p "$D/calls"
+sub=""
+for a in "$@"; do
+  case "$a" in
+    create|commit) [ -z "$sub" ] && sub="$a" ;;
+    sync) [ -z "$sub" ] && sub=sync ;;
+    get) [ -z "$sub" ] && sub=get ;;
+    list) [ -z "$sub" ] && sub=list ;;
+  esac
+done
+: > "$D/calls/$id.argv"
+for a in "$@"; do printf '%s\n' "$a" >> "$D/calls/$id.argv"; done
+echo "$sub" > "$D/calls/$id.sub"
+echo $id > "$D/pid.$sub"
+if [ "$sub" = create ] || [ "$sub" = commit ]; then cat > "$D/calls/$id.stdin"; fi
+if [ -f "$D/on_$sub" ]; then . "$D/on_$sub"; fi
+case "$sub" in
+  create|commit)
+    [ -f "$D/uuid" ] && cp "$D/uuid" "$D/parent"
+    echo "u$id" > "$D/uuid"
+    cp "$D/calls/$id.stdin" "$D/content"
+    echo "ok"
+    ;;
+  get)
+    if [ -f "$D/uuid" ]; then
+      p=""; [ -f "$D/parent" ] && p=$(cat "$D/parent")
+      printf '{"payload":{"name":"P","uuid":"%s","parent":"%s","content":"x"}}\n' "$(cat "$D/uuid")" "$p"
+    else
+      printf '{"resultCode":"FOSSIL-3006","resultText":"Wiki page not found"}\n'
+    fi
+    ;;
+  list) echo HomePage ;;
+  sync) echo "Round-trips: 1   Artifacts sent: 1  received: 0" ;;
+esac
+exit 0
+"#;
+
+impl FakeFossil {
+    pub fn new() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("fossil");
+        fs::write(&bin, SCRIPT.replace("__DIR__", dir.path().to_str().unwrap())).unwrap();
+        fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+        Self { dir, bin }
+    }
+
+    /// Install a shell snippet that runs when `sub` is invoked.
+    pub fn on(&self, sub: &str, snippet: &str) {
+        fs::write(self.dir.path().join(format!("on_{sub}")), snippet).unwrap();
+    }
+
+    /// Recorded calls as (subcommand, argv, stdin) for every invocation.
+    pub fn calls(&self) -> Vec<(String, Vec<String>, Vec<u8>)> {
+        let mut out = vec![];
+        let Ok(rd) = fs::read_dir(self.dir.path().join("calls")) else {
+            return out;
+        };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.extension().is_some_and(|x| x == "argv") {
+                let sub = fs::read_to_string(p.with_extension("sub")).unwrap_or_default();
+                let argv = fs::read_to_string(&p)
+                    .unwrap()
+                    .lines()
+                    .map(String::from)
+                    .collect();
+                let stdin = fs::read(p.with_extension("stdin")).unwrap_or_default();
+                out.push((sub.trim().to_string(), argv, stdin));
+            }
+        }
+        out
+    }
+
+    pub fn calls_to(&self, sub: &str) -> Vec<(Vec<String>, Vec<u8>)> {
+        self.calls()
+            .into_iter()
+            .filter(|c| c.0 == sub)
+            .map(|c| (c.1, c.2))
+            .collect()
+    }
+
+    pub fn file(&self, name: &str) -> PathBuf {
+        self.dir.path().join(name)
+    }
+
+    /// A placeholder repository file so binding validation sees a regular file.
+    pub fn repo_file(&self) -> PathBuf {
+        let p = self.dir.path().join("repo.fossil");
+        fs::write(&p, b"not-a-real-repo").unwrap();
+        p
+    }
+}
+
+/// Wrapper script that runs the real `fossil` with an isolated HOME.
+pub fn isolated_fossil(dir: &Path) -> PathBuf {
+    let real = which("fossil").expect("fossil binary must be on PATH for integration tests");
+    let home = dir.join("home");
+    fs::create_dir_all(&home).unwrap();
+    let bin = dir.join("fossil-isolated");
+    fs::write(
+        &bin,
+        format!(
+            "#!/bin/sh\nHOME='{}' XDG_CONFIG_HOME='{}' exec '{}' \"$@\"\n",
+            home.display(),
+            home.display(),
+            real.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+    bin
+}
+
+pub fn which(name: &str) -> Option<PathBuf> {
+    std::env::var_os("PATH")?
+        .to_string_lossy()
+        .split(':')
+        .map(|d| Path::new(d).join(name))
+        .find(|p| p.is_file())
+}
+
+/// Create a throwaway Fossil repository; returns (repo path, isolated bin, tempdir).
+pub fn real_repo() -> (PathBuf, PathBuf, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = isolated_fossil(dir.path());
+    let repo = dir.path().join("test.fossil");
+    let st = std::process::Command::new(&bin)
+        .arg("new")
+        .arg(&repo)
+        .output()
+        .expect("fossil new");
+    assert!(st.status.success(), "fossil new failed");
+    (repo, bin, dir)
+}
