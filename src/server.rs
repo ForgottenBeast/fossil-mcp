@@ -28,6 +28,7 @@ use rmcp::{
     model::{CallToolResult, ServerCapabilities, ServerInfo},
     tool, tool_router,
 };
+use schemars::{JsonSchema, generate::SchemaSettings};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -159,6 +160,20 @@ pub struct WriteToolOutput {
     pub error_code: Option<ErrorCode>,
     /// Fixed message for the code.
     pub message: Option<String>,
+}
+
+/// Generate Draft 2020-12 output schemas with explicit `null` types.
+fn output_schema_for<T: JsonSchema>() -> Arc<rmcp::model::JsonObject> {
+    let schema = SchemaSettings::draft2020_12()
+        .into_generator()
+        .into_root_schema_for::<T>();
+    let value = serde_json::to_value(schema).expect("schema must serialize");
+    Arc::new(
+        value
+            .as_object()
+            .expect("schema root must be an object")
+            .clone(),
+    )
 }
 
 enum Head {
@@ -662,7 +677,8 @@ impl FossilWiki {
             destructive_hint = false,
             idempotent_hint = true,
             open_world_hint = false
-        )
+        ),
+        output_schema = output_schema_for::<types::ListWikiPagesResponse>()
     )]
     pub async fn list_wiki_pages(&self) -> Result<Json<types::ListWikiPagesResponse>, String> {
         let out = self
@@ -690,7 +706,8 @@ impl FossilWiki {
             destructive_hint = false,
             idempotent_hint = true,
             open_world_hint = false
-        )
+        ),
+        output_schema = output_schema_for::<types::ReadWikiPageResponse>()
     )]
     pub async fn read_wiki_page(
         &self,
@@ -723,7 +740,8 @@ impl FossilWiki {
             destructive_hint = false,
             idempotent_hint = true,
             open_world_hint = true
-        )
+        ),
+        output_schema = output_schema_for::<WikiBacklinksResponse>()
     )]
     pub async fn wiki_backlinks(
         &self,
@@ -801,7 +819,7 @@ impl FossilWiki {
     #[tool(
         description = "Create or update a wiki page; returns a typed receipt (commit_state, publication_state, revision)",
         annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = true),
-        output_schema = rmcp::handler::server::common::schema_for_type::<WriteToolOutput>()
+        output_schema = output_schema_for::<WriteToolOutput>()
     )]
     pub async fn write_wiki_page(
         &self,
@@ -870,7 +888,7 @@ impl FossilWiki {
     #[tool(
         description = "Return the stored receipt of an earlier write_wiki_page operation",
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false),
-        output_schema = rmcp::handler::server::common::schema_for_type::<WriteToolOutput>()
+        output_schema = output_schema_for::<WriteToolOutput>()
     )]
     pub async fn wiki_operation_status(
         &self,
@@ -899,7 +917,7 @@ impl FossilWiki {
     #[tool(
         description = "Reconcile an earlier write: report its receipt, optionally retrying only the sync of a committed revision",
         annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = true),
-        output_schema = rmcp::handler::server::common::schema_for_type::<WriteToolOutput>()
+        output_schema = output_schema_for::<WriteToolOutput>()
     )]
     pub async fn wiki_reconcile_operation(
         &self,
@@ -1037,5 +1055,45 @@ mod tests {
         assert!(!valid_page_name("a\nb"));
         assert!(!valid_page_name(&"x".repeat(257)));
         assert!(valid_page_name(&"x".repeat(256)));
+    }
+
+    #[test]
+    fn output_schemas_preserve_null_types_for_optional_fields() {
+        fn allows_null(schema: &serde_json::Value) -> bool {
+            schema["type"]
+                .as_array()
+                .is_some_and(|types| types.iter().any(|ty| ty == "null"))
+                || schema["type"] == "null"
+                || schema["anyOf"]
+                    .as_array()
+                    .is_some_and(|schemas| schemas.iter().any(allows_null))
+        }
+
+        let output_schemas = [
+            output_schema_for::<types::ListWikiPagesResponse>(),
+            output_schema_for::<types::ReadWikiPageResponse>(),
+            output_schema_for::<WikiBacklinksResponse>(),
+            output_schema_for::<WriteToolOutput>(),
+        ];
+        for schema in output_schemas {
+            serde_json::to_string(&schema).expect("output schema must serialize");
+        }
+
+        let backlinks = output_schema_for::<WikiBacklinksResponse>();
+        assert!(allows_null(&backlinks["properties"]["next_cursor"]));
+
+        let write = output_schema_for::<WriteToolOutput>();
+        assert!(allows_null(&write["properties"]["receipt"]));
+        assert!(allows_null(&write["properties"]["error_code"]));
+        assert!(allows_null(&write["properties"]["message"]));
+        assert!(allows_null(
+            &write["$defs"]["WriteReceipt"]["properties"]["previous_revision"]
+        ));
+        assert!(allows_null(
+            &write["$defs"]["WriteReceipt"]["properties"]["revision"]
+        ));
+        assert!(allows_null(
+            &write["$defs"]["WriteReceipt"]["properties"]["error_code"]
+        ));
     }
 }
